@@ -1,0 +1,4 @@
+(executable
+ (name advisories)
+ (public_name advisories)
+ (libraries cmdliner purl jsont cmarkit bos ptime fmt))

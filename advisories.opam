@@ -1,0 +1,29 @@
+opam-version: "2.0"
+maintainer: "Hannes Mehnert <hannes@mehnert.org>"
+authors: "Hannes Mehnert <hannes@mehnert.org>"
+license: "ISC"
+homepage: "https://github.com/hannesm/advisories"
+doc: "https://hannesm.github.io/advisories/doc"
+bug-reports: "https://github.com/hannesm/advisories/issues"
+depends: [
+  "ocaml" {>= "4.14.0"}
+  "dune" {>= "1.0"}
+  "cmarkit" {>= "0.3.0"}
+  "jsont" {>= "0.2.0"}
+  "cmdliner" {>= "2.1.0"}
+  "bos" {>= "0.2.1"}
+  "ptime" {>= "1.2.0"}
+  "gmt" {>= "0.11.0"}
+  "purl" {>= "1.0.0"}
+]
+build: [
+  ["dune" "subst"] {dev}
+  ["dune" "build" "-p" name "-j" jobs]
+  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
+]
+dev-repo: "git+https://github.com/hannesm/advisories.git"
+synopsis: "OCaml security advisory database management"
+description: """
+Tools for managing the OCaml security advisory database.
+"""
+x-maintenance-intent: [ "(latest)" ]
