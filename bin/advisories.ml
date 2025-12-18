@@ -171,19 +171,6 @@ type t = {
 
 module SM = Map.Make(String)
 
-let valid_id data =
-  String.for_all (function
-      | '!'..'~' -> true
-      | _ -> false)
-    data
-
-let count_open_lists data =
-  String.fold_left (fun acc -> function
-      | '[' -> acc + 1
-      | ']' -> acc - 1
-      | _ -> acc)
-    0 data
-
 let parse_date ~context data =
   Result.map_error (fun msg -> Fmt.str "couldn't parse %s: %s" context msg)
     (Result.map (fun (t, _tz_off, _count) -> t)
@@ -196,68 +183,6 @@ let parse_severity data =
     Ok (CVSS_V3, data)
   else
     Ok (CVSS_V2, data)
-
-let parse_id ?(off = 0) data =
-  match String.index_from data off ' ' with
-  | exception Invalid_argument _ -> err_msg "missing whitespace in (off %u) %S" off data
-  | exception Not_found -> err_msg "missing whitespace in (off %u) %S" off data
-  | ws_idx -> Ok (String.sub data off ws_idx, ws_idx + 1)
-
-let parse_quoted_string ?(off = 0) data =
-  match String.index_from data off '"' with
-  | exception Invalid_argument _ -> err_msg "missing first double quote in (off %u) %S" off data
-  | exception Not_found -> err_msg "missing first double quote in (off %u) %S" off data
-  | t1_idx ->
-    match String.index_from data (t1_idx + 1) '"' with
-    | exception Invalid_argument _ -> err_msg "missing second double quote in (off %u) %S" (t1_idx + 1) data
-    | exception Not_found -> err_msg "missing second double quote in (off %u) %S" (t1_idx + 1) data
-    | t2_idx -> Ok (String.sub data (t1_idx + 1) (t2_idx - t1_idx - 1), t2_idx + 1)
-
-let parse_list ?(off = 0) data =
-  print_endline ("parse_list " ^ data);
-  match String.index_from data off '[' with
-  | exception Invalid_argument _ -> err_msg "missing [ in (off %u) %S" off data
-  | exception Not_found -> err_msg "missing [ in (off %u) %S" off data
-  | t1_idx ->
-    let rec skip_nested off =
-      match String.index_from data (off + 1) '[' with
-      | exception Invalid_argument _ -> Ok off
-      | exception Not_found -> Ok off
-      | idx ->
-        match String.index_from data idx ']' with
-        | exception Invalid_argument _ -> err_msg "missing ] in (off %u) %S" (t1_idx + 1) data
-        | exception Not_found -> err_msg "missing ] in (off %u) %S" (t1_idx + 1) data
-        | idx -> skip_nested (idx + 1)
-    in
-    let* off = skip_nested t1_idx in
-    match String.index_from data off ']' with
-    | exception Invalid_argument _ -> err_msg "missing ] in (off %u) %S" (t1_idx + 1) data
-    | exception Not_found -> err_msg "missing ] in (off %u) %S" (t1_idx + 1) data
-    | t2_idx ->
-      let r = String.sub data (t1_idx + 1) (t2_idx - t1_idx - 1) in
-      print_endline ("resulted in " ^ r);
-      Ok (r, t2_idx + 1)
-
-let parse_a_list (p : ?off:int -> string -> (string * int, string) result) ?off data =
-  let* data', off = parse_list ?off data in
-  let* () = guard (String.length data = off) "trailing data in list" in
-  (* separator is either whitespace or newline *)
-  let data' = String.map (function '\n' -> ' ' | x -> x) data' in
-  let l = String.length data' in
-  let rec go acc off =
-    if off = l then
-      Ok acc
-    else
-      let* id, off' = p ~off data' in
-      go (id :: acc) off'
-  in
-  Result.map List.rev (go [] 0)
-
-let parse_id_list ?off data =
-  parse_a_list parse_id ?off data
-
-let parse_string_list ?off data =
-  parse_a_list parse_quoted_string ?off data
 
 (*let parse_affected data =
   we generate the "package - ecosystem: opam, name: pkg_name, purl: purl" from the data
@@ -274,7 +199,7 @@ let parse_string_list ?off data =
     for each element u of the union:
       let purl = pkg://opam/p/u
 *)
-
+(*
 let parse_events data =
   let* range_type, off = parse_id data in
   let* range_type = event_range_type_of_string range_type in
@@ -326,56 +251,39 @@ let parse_credit data =
     in
     let* contact = decode_contact [] 0 in
     Ok (credit, name, contact)
+*)
+let pp_pos line_offset ppf pos =
+  let OpamParserTypes.FullPos.{ start ; stop ; filename } = pos in
+  Fmt.pf ppf "in %s from %u,%u to %u,%u"
+    filename (fst start + line_offset) (snd start)
+    (fst stop + line_offset) (snd stop)
 
-let parse_header data =
-  let rec fields map state data = match state, data with
-    | state, "" :: tl -> fields map state tl
-    | `normal, hd :: tl ->
-      (match String.index_opt hd ':' with
-       | None -> err_msg "expected key-value in header, got %s" hd
-       | Some idx ->
-         let key = String.sub hd 0 idx in
-         let value =
-           if String.length hd > idx + 1 then
-             if String.get hd (idx + 1) = ' ' then
-               Some (String.sub hd (idx + 2) (String.length hd - idx - 2))
-             else
-               Some (String.sub hd (idx + 1) (String.length hd - idx - 1))
-           else
-             None
-         in
-         let* map, state =
-           match value with
-           | None ->
-             Ok (map, `lists (0, key, []))
-           | Some value ->
-             let lists = count_open_lists value in
-             if lists = 0 then
-               if SM.mem key map then
-                 err_msg "key %s already present" key
-               else
-                 Ok (SM.add key (`string value) map, `normal)
-             else
-               Ok (map, `lists (lists, key, [ value ]))
-         in
-         fields map state tl)
-    | `normal, [] -> Ok map
-    | `lists (opened, key, value), hd :: tl ->
-      let lists = count_open_lists hd in
-      let* map, state =
-        if opened + lists = 0 then
-          if SM.mem key map then
-            err_msg "key %s already present" key
-          else
-            Ok (SM.add key (`list (List.rev (hd :: value))) map, `normal)
-        else
-          Ok (map, `lists (opened + lists, key, hd :: value))
-      in
-      fields map state tl
-    | `lists (count, key, _), [] ->
-      err_msg "expected more data (parsing list %u) at key %s" count key
+let parse_header ?(filename = "no filename provided") line_offset data =
+  let* opamfile =
+    try Ok (OpamParser.FullPos.string data filename)
+    with Parsing.Parse_error -> Error "parse error"
   in
-  let* fields = fields SM.empty `normal data in
+  let pp_pos = pp_pos line_offset in
+  (* opamfile_item list (with source position) *)
+  let* _map =
+    List.fold_left (fun map v ->
+        let open OpamParserTypes.FullPos in
+        let* map in
+        match v with
+        | { pelem = Variable ({ pelem = name ; _ }, value) ; pos } ->
+          (match SM.find_opt name map with
+           | Some (pos', _) ->
+             err_msg "an entry named %s already exists (previous definition %a, this definition %a)"
+               name pp_pos pos' pp_pos pos
+           | None ->
+             print_endline ("added " ^ name);
+             Ok (SM.add name (pos, value) map))
+        | { pelem = Section { section_kind = { pelem = name ; _ } ; _ } ; pos } ->
+          err_msg "unexpected section %s at %a" name pp_pos pos)
+      (Ok SM.empty) opamfile.OpamParserTypes.FullPos.file_contents
+  in
+  Ok ()
+(*
   let* id =
     let* id =
       Option.to_result ~none:"missing id"
@@ -482,19 +390,21 @@ let parse_header data =
   in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
        severity ; severity_score ; affected ; events ; references ; credits }
+*)
 
-let parse file =
+let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
   (* expected format is a header of metadata, which is separated by '```\n' from the body *)
-  let* header, summary, description, body =
-    let rec separate (hdr, summ) state data =
+  let* header, hdr_off, summary, description, body =
+    let rec separate (hdr, hdr_off, summ) state data =
       match state, data with
-      | state, "" :: tl -> separate (hdr, summ) state tl
-      | `initial, "```" :: tl -> separate (hdr, summ) `header tl
+      | `initial, "" :: tl -> separate (hdr, hdr_off + 1, summ) state tl
+      | state, "" :: tl -> separate (hdr, hdr_off, summ) state tl
+      | `initial, "```" :: tl -> separate (hdr, hdr_off + 1, summ) `header tl
       | `initial, data ->
         err_msg "expected header (```), received: %s" (String.concat "\n" data)
-      | `header, "```" :: tl -> separate (List.rev hdr, summ) `summary tl
-      | `header, hd :: tl -> separate (hd :: hdr, summ) `header tl
+      | `header, "```" :: tl -> separate (List.rev hdr, hdr_off, summ) `summary tl
+      | `header, hd :: tl -> separate (hd :: hdr, hdr_off, summ) `header tl
       | `header, [] ->
         err_msg "expected header (```), received: %s" (String.concat "\n" data)
       | `summary, hd :: tl when String.starts_with ~prefix:"# " hd ->
@@ -503,29 +413,28 @@ let parse file =
           Error "summary exceeds length of 120 characters"
         else
           let details = String.concat "\n" tl in
-          Ok (hdr, summary, details, hd ^ "\n" ^ details)
+          Ok (hdr, hdr_off, summary, details, hd ^ "\n" ^ details)
       | `summary, data ->
         err_msg "expected summary (# <summary>), received: %s" (String.concat "\n" data)
     in
-    separate ([], "") `initial (String.split_on_char '\n' data)
+    separate ([], 0, "") `initial (String.split_on_char '\n' data)
   in
-  let* header = parse_header header in
-  (* let doc = Cmarkit.Doc.of_string ~strict:false ~heading_auto_ids:true body in *)
-  Ok (header, summary, description, body)
-
-(* let to_json (header, summary, description, _) =
-   assert false *)
+  Ok (String.concat "\n" header, hdr_off, summary, description, body)
 
 let () =
-  match parse (Fpath.v "./OSEC-2018-1.md") with
-  | Ok (header, summary, _details, _body) ->
-    print_endline "header:";
-    Format.printf "%a" pp_header header;
-    print_endline ("summary: " ^ summary)
-  (* print_endline ("details: " ^ details) *)
+  let r =
+    let filename = "OSEC-2018-1.md" in
+    let* (header, hdr_off, summary, _details, _body) =
+      parse_file (Fpath.v ("./" ^ filename))
+    in
+    print_endline "parsed file";
+    let* () = parse_header ~filename hdr_off header in
+    print_endline ("summary: " ^ summary);
+    Ok ()
+  in
+  match r with
+  | Ok () -> ()
   | Error str -> print_endline ("error: " ^ str)
-  (* let* json = to_json advisory in *)
-  (* print_endline json *)
 
 (* validation:
 check-jsonschema --schemafile osv-schema.json <output.json>
