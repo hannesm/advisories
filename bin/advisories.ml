@@ -1,6 +1,10 @@
 
 let ( let* ) = Result.bind
 
+let msg fmt =
+  let kerr _ = Format.flush_str_formatter () in
+  Format.kfprintf kerr Format.str_formatter fmt
+
 let err_msg fmt =
   let kerr _ = Error (Format.flush_str_formatter ()) in
   Format.kfprintf kerr Format.str_formatter fmt
@@ -125,6 +129,22 @@ let severity_type_to_string = function
   | CVSS_V3 -> "CVSS_V3"
   | CVSS_V4 -> "CVSS_V4"
 
+type pkg_version = OpamParserTypes.relop * string
+
+let pp_pkg_version ppf (relop, version) =
+  let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
+  Fmt.pf ppf "%s %S" relop_str version
+
+type pkg_versions =
+  | Atom of pkg_version
+  | And of pkg_versions * pkg_versions
+  | Or of pkg_versions * pkg_versions
+
+let rec pp_pkg_versions ppf = function
+  | Atom v -> pp_pkg_version ppf v
+  | And (a, b) -> Fmt.pf ppf "%a & %a" pp_pkg_versions a pp_pkg_versions b
+  | Or (a, b) -> Fmt.pf ppf "%a | %a" pp_pkg_versions a pp_pkg_versions b
+
 type header = {
   id : string ;
   modified : Ptime.t ;
@@ -135,7 +155,7 @@ type header = {
   related : string list ;
   severity : (severity_type * string) option;
   severity_score : string option ;
-  affected : string ;
+  affected : string * pkg_versions ;
   events : event list ;
   references : reference list ;
   credits : credit list ;
@@ -154,7 +174,7 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
   Fmt.pf ppf "  severity: %a@." Fmt.(option ~none:(any "no") (pair ~sep:(any ", ") string string))
     (Option.map (fun (t, s) -> severity_type_to_string t, s) severity);
   Fmt.pf ppf "  severity_score: %a@." Fmt.(option ~none:(any "no") string) severity_score;
-  Fmt.pf ppf "  affected: %S@." affected;
+  Fmt.pf ppf "  affected: %S %a@." (fst affected) pp_pkg_versions (snd affected);
   Fmt.pf ppf "  events: %a@." Fmt.(list ~sep:(any ", ") pp_event) events;
   Fmt.pf ppf "  references: %a@."
     Fmt.(list ~sep:(any ", ") (pair ~sep:(any ": ") string string))
@@ -171,25 +191,29 @@ type t = {
 
 module SM = Map.Make(String)
 
+let pp_lines start ppf lines =
+  List.iteri (fun i l -> Fmt.pf ppf "%u | %s@." (i + start) l) lines
+
 let parse_date ~context data =
-  Result.map_error (fun msg -> Fmt.str "couldn't parse %s: %s" context msg)
+  Result.map_error (fun msg -> Fmt.str "couldn't parse %s: character %s" context msg)
     (Result.map (fun (t, _tz_off, _count) -> t)
        (Ptime.rfc3339_string_error (Ptime.of_rfc3339 data)))
 
 let parse_severity data =
   if String.starts_with ~prefix:"CVSS:4." data then
-    Ok (CVSS_V4, data)
+    (CVSS_V4, data)
   else if String.starts_with ~prefix:"CVSS:3." data then
-    Ok (CVSS_V3, data)
+    (CVSS_V3, data)
   else
-    Ok (CVSS_V2, data)
+    (CVSS_V2, data)
 
-(*let parse_affected data =
-  we generate the "package - ecosystem: opam, name: pkg_name, purl: purl" from the data
-  below, we also generate the ranges (introduced and fixed)
-    introduced: the things behind the >= constraint
-    fixed: the thing behind the < constraint
-  and we produce the list of versions below (we just put in purl)
+let parse_affected pp_err lines data =
+  (* TODO later:
+     we generate the "package - ecosystem: opam, name: pkg_name, purl: purl" from the data
+     below, we also generate the ranges (introduced and fixed)
+     introduced: the things behind the >= constraint
+     fixed: the thing behind the < constraint
+     and we produce the list of versions below (we just put in purl)
 
   for a given package p and a set of constraints (likely >= and < OR only <):
     if p = ocaml, run with p = ocaml-variants, p = ocaml-base-compiler, and p = ocaml-system, and p = ocaml-secondary-compiler
@@ -197,200 +221,328 @@ let parse_severity data =
       opam info '$p$c --all-versions -f version
     build up the union of the runs
     for each element u of the union:
-      let purl = pkg://opam/p/u
-*)
-(*
-let parse_events data =
-  let* range_type, off = parse_id data in
-  let* range_type = event_range_type_of_string range_type in
-  let* repo, off = parse_id ~off data in
-  print_endline ("here " ^ data);
-  let* events, off = parse_list ~off data in
-  let* () = guard (off = String.length data) ("trailing data in events") in
-  let* events =
-    Result.map List.rev
-      (List.fold_left (fun acc data ->
-           if String.trim data = "" then acc else
-             let data = String.trim data in
-           let* acc in
-           let* event_type, off = parse_id data in
-           print_endline ("event_type is " ^ event_type ^ " (data: " ^ data ^ ")");
-           let* event_type = event_type_of_string event_type in
-           Ok ((event_type, String.sub data off (String.length data - off)) :: acc))
-          (Ok []) (String.split_on_char '\n' events))
+      let purl = pkg://opam/p/u *)
+  let open OpamParserTypes.FullPos in
+  (* constraints are of the form:
+     >= "1" --> Prefix_relop `Geq, String "1"
+     >= "1" & < "1.2" --> Logop `And, (Prefix_relop `Geq, String "1"), (Prefix_relop `Lt, String "1.2")
+     (>= "1" & < "1.2") | (>= "2.3" & < "5")
+       --> Logop `Or, (Group (Prefix_relop `Geq, String "1"), (Prefix_relop `Lt, String "1.2")),
+           (Group (Prefix_relop `Geq, String "2.3"), (Prefix_relop `Lt, String "5")),
+  *)
+  let rec parse_constraint = function
+    | { pelem = Logop ({ pelem = l ; _ }, v1, v2); _ } ->
+      let* c1 = parse_constraint v1 in
+      let* c2 = parse_constraint v2 in
+      let c = match l with `And -> And (c1, c2) | `Or -> Or (c1, c2) in
+      Ok c
+    | { pelem = Prefix_relop ({ pelem = relop ; _ }, { pelem = String version ; _ }) ; _ } ->
+      Ok (Atom (relop, version))
+    | { pelem = Group { pelem = [ cs ] ; _ } ; _ } ->
+      parse_constraint cs
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected a relative operation, a logical operation, or a group. Found %s" (pp_err pos) (lines pos)
+        (OpamPrinter.FullPos.value v)
   in
-  Ok (range_type, repo, events)
+  match data with
+  | { pelem = Option ({ pelem = String pkg ; _ }, { pelem = [ constraints ] ; _}); _ } ->
+    let* cs = parse_constraint constraints in
+    Ok (pkg, cs)
+  | { pos; _ } as v ->
+    err_msg "%a@.Expected an option (package { constraints }). Found %s" (pp_err pos) (lines pos)
+        (OpamPrinter.FullPos.value v)
 
-let parse_reference data =
-  (* expect a line of <typ> URL *)
-  print_endline ("reference: " ^ data);
-  let* reftype, ws_idx = parse_id data in
-  let* reftype = reference_type_of_string reftype in
-  let url = String.sub data ws_idx (String.length data - ws_idx) in
-  Ok (reftype, url)
+let parse_events pp_err lines data =
+  let open OpamParserTypes.FullPos in
+  let parse_event = function
+    | { pelem = List { pelem = [ { pelem = Ident event_type ; pos } ; { pelem = String data ; _ } ]; _ }; _ } ->
+      let* event_type =
+        Result.map_error (fun m -> msg "%a@.%s" (pp_err pos) (lines pos) m)
+          (event_type_of_string event_type)
+      in
+      Ok (event_type, data)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected event_type and data, found %s." (pp_err pos) (lines pos)
+        (OpamPrinter.FullPos.value v)
+  in
+  let parse_events = function
+    | { pelem = List { pelem = [ { pelem = Ident _ ; _ } ; { pelem = String _ ; _ }]; _ }; _ } as ev ->
+      let* r = parse_event ev in
+      Ok [ r ]
+    | { pelem = List { pelem = evs; _ }; _ } ->
+      let* evs =
+        List.fold_left (fun acc ev ->
+            let* acc in
+            let* ev = parse_event ev in
+            Ok (ev :: acc))
+          (Ok []) evs
+      in
+      Ok (List.rev evs)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected events (consisting of event_type and data), found %s." (pp_err pos) (lines pos)
+        (OpamPrinter.FullPos.value v)
+  in
+  let parse_one = function
+    | { pelem = List { pelem = [ { pelem = Ident range_type ; pos } ; { pelem = String repo ; _ } ; evs ]; _}; _ } ->
+      let* evs = parse_events evs in
+      let* range_type =
+        Result.map_error (fun m -> msg "%a@.%s" (pp_err pos) (lines pos) m)
+          (event_range_type_of_string range_type)
+      in
+      Ok (range_type, repo, evs)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected range_type, repo, and events, found %s." (pp_err pos) (lines pos)
+        (OpamPrinter.FullPos.value v)
+  in
+  match data with
+  | { pelem = List { pelem = ({ pelem = Ident _ ; _ } :: _); _ }; _ } ->
+    let* ev = parse_one data in
+    Ok [ ev ]
+  | { pelem = List { pelem = ranges ; _ }; _ } ->
+    let* es =
+      List.fold_left (fun acc range ->
+          let* acc in
+          let* rt = parse_one range in
+          Ok (rt :: acc))
+        (Ok []) ranges
+    in
+    Ok (List.rev es)
+  | { pos; _ } as v ->
+    err_msg "%a@.Expected a list of range_type, repo, and events, found %s." (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
 
-let parse_credit data =
-  (* expected a line of <typ> "<name>" [ <contact> ] (optional) *)
-  let* credit, ws_idx = parse_id data in
-  let* credit = credit_type_of_string credit in
-  let* name, rest_off = parse_quoted_string ~off:ws_idx data in
-  match parse_list ~off:rest_off data with
-  | Error _ -> Ok (credit, name, [])
-  | Ok (contact, final_off) ->
-    let* () =
-      guard (final_off = String.length data) ("trailing data in credit " ^ data)
+let parse_references pp_err lines data =
+  let open OpamParserTypes.FullPos in
+  let parse_one = function
+    | { pelem = List { pelem = [ { pelem = Ident typ ; pos } ; { pelem = String data ; _ } ]; _ }; _ } ->
+      let* reftype =
+        Result.map_error (fun m -> msg "%a@.%s" (pp_err pos) (lines pos) m)
+          (reference_type_of_string typ)
+      in
+      Ok (reftype, data)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected a reference type and a string, found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
+  in
+  match data with
+  | { pelem = List { pelem = [ { pelem = Ident _ ; _ } ; { pelem = String _ ; _ } ] ; _ } ; _ } ->
+    let* r = parse_one data in
+    Ok [ r ]
+  | { pelem = List { pelem = refs; _ }; _ } ->
+    let* refs =
+      List.fold_left (fun acc r ->
+          let* acc in
+          let* r = parse_one r in
+          Ok (r :: acc))
+        (Ok []) refs
     in
-    let contact = String.trim contact in
-    let c_len = String.length contact in
-    let rec decode_contact acc off =
-      if off = c_len then
-        Ok (List.rev acc)
-      else
-        let* d, off = parse_quoted_string ~off contact in
-        decode_contact (d :: acc) off
+    Ok (List.rev refs)
+  | { pos; _ } as v ->
+    err_msg "%a@.Expected a list of reference types and strings, found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
+
+let parse_credits pp_err lines data =
+  let open OpamParserTypes.FullPos in
+  let parse_contacts = function
+    | { pelem = List { pelem = cs; _ }; _ } ->
+      let* contacts =
+        List.fold_left (fun acc c ->
+            let* acc in
+            match c with
+            | { pelem = String s ; _ } -> Ok (s :: acc)
+            | { pos; _ } as v -> err_msg "%a@.Expected a list of strings, found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v))
+          (Ok []) cs
+      in
+      Ok (List.rev contacts)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected a list of strings, found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
+  in
+  let parse_credit = function
+    | { pelem = List { pelem = [ { pelem = Ident typ ; pos } ; { pelem = String name ; _ } ]; _ }; _ } ->
+      let* credit =
+        Result.map_error (fun m -> msg "%a@.%s" (pp_err pos) (lines pos) m)
+          (credit_type_of_string typ)
+      in
+      Ok (credit, name, [])
+    | { pelem = List { pelem = [ { pelem = Ident typ ; pos } ; { pelem = String name ; _ } ; contacts ]; _ }; _ } ->
+      let* credit =
+        Result.map_error (fun m -> msg "%a@.%s" (pp_err pos) (lines pos) m)
+          (credit_type_of_string typ)
+      in
+      let* contacts = parse_contacts contacts in
+      Ok (credit, name, contacts)
+    | { pos; _ } as v ->
+      err_msg "%a@.Expected a credit (typ, name, contact), found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
+  in
+  match data with
+  | { pelem = List { pelem = ({ pelem = Ident _; _} :: _); _ }; _ } ->
+    let* c = parse_credit data in
+    Ok [ c ]
+  | { pelem = List { pelem = cs; _}; _ } ->
+    let* cs =
+      List.fold_left (fun acc c ->
+          let* acc in
+          let* c = parse_credit c in
+          Ok (c :: acc))
+        (Ok []) cs
     in
-    let* contact = decode_contact [] 0 in
-    Ok (credit, name, contact)
-*)
+    Ok (List.rev cs)
+  | { pos; _} as v ->
+    err_msg "%a@.Expected a list of credits (typ, name, contact), found %s" (pp_err pos) (lines pos) (OpamPrinter.FullPos.value v)
+
 let pp_pos line_offset ppf pos =
   let OpamParserTypes.FullPos.{ start ; stop ; filename } = pos in
   Fmt.pf ppf "in %s from %u,%u to %u,%u"
     filename (fst start + line_offset) (snd start)
     (fst stop + line_offset) (snd stop)
 
+let pp_error line_offset pos ppf lines =
+  let OpamParserTypes.FullPos.{ start ; stop ; filename } = pos in
+  let stop_line = if fst start = fst stop then None else Some (fst stop + line_offset) in
+  Fmt.pf ppf "File %S, line %u%a, characters %u-%u:@.%a"
+    filename (fst start + line_offset)
+    Fmt.(option ~none:(any "") (any "-" ++ int)) stop_line
+    (snd start) (snd stop)
+    (pp_lines (fst start + line_offset)) lines
+
 let parse_header ?(filename = "no filename provided") line_offset data =
+  let open OpamParserTypes.FullPos in
   let* opamfile =
     try Ok (OpamParser.FullPos.string data filename)
     with Parsing.Parse_error -> Error "parse error"
   in
+  let lines = String.split_on_char '\n' data in
+  let get_lines pos =
+    let r = ref [] in
+    for i = fst pos.start - 1 to fst pos.stop - 1 do
+      r := List.nth lines i :: !r
+    done;
+    List.rev !r
+  in
   let pp_pos = pp_pos line_offset in
+  let pp_error = pp_error line_offset in
+  let parse_date ~context = function
+    | _, { pelem = String ts ; pos } ->
+      Result.map_error (fun m -> msg "%a@.%s" (pp_error pos) (get_lines pos) m)
+        (parse_date ~context ts)
+    | pos, value ->
+      err_msg "%a@.Expected a string for %S, found %s"
+        (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value value)
+  in
+  let parse_opt_id_list ~context = function
+    | None -> Ok []
+    | Some (_, { pelem = List { pelem = vs ; _ } ; _ }) ->
+      let* vs =
+        List.fold_left (fun acc v ->
+            let* acc in
+            match v with
+            | { pelem = Ident id ; _ } -> Ok (id :: acc)
+            | { pos ; _ } as v ->
+              err_msg "%a@.Expected a list of identifiers for %S, found %s"
+                (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value v))
+          (Ok []) vs
+      in
+      Ok (List.rev vs)
+    | Some (_, { pelem = Ident id ; _ }) ->
+      Ok [ id ]
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a list of identifiers (or a single identifier) for %S, found %s"
+        (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value value)
+  in
   (* opamfile_item list (with source position) *)
-  let* _map =
+  let* fields =
     List.fold_left (fun map v ->
-        let open OpamParserTypes.FullPos in
         let* map in
         match v with
         | { pelem = Variable ({ pelem = name ; _ }, value) ; pos } ->
           (match SM.find_opt name map with
            | Some (pos', _) ->
-             err_msg "an entry named %s already exists (previous definition %a, this definition %a)"
-               name pp_pos pos' pp_pos pos
+             err_msg "%a@.An entry named %S already exists:@.%a"
+               (pp_error pos) (get_lines pos) name
+               (pp_lines (line_offset + fst pos'.start)) (get_lines pos')
            | None ->
-             print_endline ("added " ^ name);
              Ok (SM.add name (pos, value) map))
         | { pelem = Section { section_kind = { pelem = name ; _ } ; _ } ; pos } ->
           err_msg "unexpected section %s at %a" name pp_pos pos)
-      (Ok SM.empty) opamfile.OpamParserTypes.FullPos.file_contents
+      (Ok SM.empty) opamfile.file_contents
   in
-  Ok ()
-(*
   let* id =
     let* id =
       Option.to_result ~none:"missing id"
         (SM.find_opt "id" fields)
     in
     match id with
-    | `string id when valid_id id -> Ok id
-    | `string id -> err_msg "invalid id %S" id
-    | `list _ -> err_msg "expected a single string as id, got a list"
+    | _, { pelem = Ident id ; _ } -> Ok id
+    | pos, value ->
+      err_msg "%a@.Expected an identifier for \"id\", found %s"
+        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
   let* modified =
     let* ts =
       Option.to_result ~none:"missing modified"
         (SM.find_opt "modified" fields)
     in
-    match ts with
-    | `string ts -> parse_date ~context:"modified" ts
-    | `list _ -> err_msg "expected a single string as modified, got a list"
+    parse_date ~context:"modified" ts
   in
   let* published =
     match SM.find_opt "published" fields with
-    | Some `string ts -> Result.map (fun ts -> Some ts) (parse_date ~context:"published" ts)
-    | Some `list _ -> err_msg "expected a single string as published, got a list"
+    | Some x -> Result.map (fun ts -> Some ts) (parse_date ~context:"published" x)
     | None -> Ok None
   in
   let* withdrawn =
     match SM.find_opt "withdrawn" fields with
-    | Some `string ts -> Result.map (fun ts -> Some ts) (parse_date ~context:"withdrawn" ts)
-    | Some `list _ -> err_msg "expected a single string as withdrawn, got a list"
+    | Some ts -> Result.map (fun ts -> Some ts) (parse_date ~context:"withdrawn" ts)
     | None -> Ok None
   in
   let* aliases =
-    match SM.find_opt "aliases" fields with
-    | None -> Ok []
-    | Some `string s -> parse_id_list s
-    | Some `list xs -> parse_id_list (String.concat " " xs)
+    parse_opt_id_list ~context:"aliases" (SM.find_opt "aliases" fields)
   in
   let* upstream =
-    match SM.find_opt "upstream" fields with
-    | None -> Ok []
-    | Some `string s -> parse_id_list s
-    | Some `list xs -> parse_id_list (String.concat " " xs)
+    parse_opt_id_list ~context:"upstream" (SM.find_opt "upstream" fields)
   in
   let* related =
-    match SM.find_opt "related" fields with
-    | None -> Ok []
-    | Some `string s -> parse_id_list s
-    | Some `list xs -> parse_id_list (String.concat " " xs)
+    parse_opt_id_list ~context:"related" (SM.find_opt "related" fields)
   in
   let* severity =
     match SM.find_opt "severity" fields with
     | None -> Ok None
-    | Some `string s -> Result.map (fun s -> Some s) (parse_severity s)
-    | Some `list _ -> err_msg "expected a string for severity, found a list"
+    | Some (_, { pelem = String s ; _ }) ->
+      let s = parse_severity s in
+      Ok (Some s)
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a string for \"severity\", found %s"
+        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
   let* severity_score =
     match SM.find_opt "severity_score" fields with
     | None -> Ok None
-    | Some `string s -> Ok (Some s)
-    | Some `list _ -> err_msg "expected a string for severity, found a list"
+    | Some (_, { pelem = String s ; _ }) -> Ok (Some s)
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a string for \"severity_score\", found %s"
+        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
   let* affected =
     match SM.find_opt "affected" fields with
     | None -> err_msg "expected something being affected"
-    | Some `string s -> Ok s
-    | Some `list _ -> err_msg "expected a string for affected, found a list"
+    | Some (_, elem) -> parse_affected pp_error get_lines elem
   in
   let* events =
     match SM.find_opt "events" fields with
     | None -> Ok []
-    | Some `list xs ->
-      let* data, _off = parse_list (String.concat "\n" xs) in
-      print_endline ("starting to parse " ^ data);
-      Result.map (fun ev -> [ ev ]) (parse_events (String.trim data))
-    | Some `string _ -> err_msg "expected a list for events, found a string"
+    | Some (_, ({ pelem = List _ ; _ } as elem)) -> parse_events pp_error get_lines elem
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a list for \"events\", found %s"
+        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
   let* references =
     match SM.find_opt "references" fields with
     | None -> Ok []
-    | Some `string _ -> err_msg "expected a list of references, found a string"
-    | Some `list xs ->
-      let* data, _ = parse_list (String.concat "\n" xs) in
-      List.fold_left (fun acc data ->
-          let data = String.trim data in
-          if data = "" then acc else
-          let* acc in
-          let* reference = parse_reference data in
-          Ok (reference :: acc))
-        (Ok []) (String.split_on_char '\n' data) |> Result.map List.rev
+    | Some (_, elem) -> parse_references pp_error get_lines elem
   in
   let* credits =
     match SM.find_opt "credits" fields with
     | None -> Ok []
-    | Some `string _ -> err_msg "expected a list of credits, found a string"
-    | Some `list xs ->
-      let* data, _ = parse_list (String.concat "\n" xs) in
-      List.fold_left (fun acc data ->
-          let data = String.trim data in
-          if data = "" then acc else
-          let* acc in
-          let* credit = parse_credit data in
-          Ok (credit :: acc))
-        (Ok []) (String.split_on_char '\n' data) |> Result.map List.rev
+    | Some (_, elem) -> parse_credits pp_error get_lines elem
   in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
        severity ; severity_score ; affected ; events ; references ; credits }
-*)
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -427,8 +579,8 @@ let () =
     let* (header, hdr_off, summary, _details, _body) =
       parse_file (Fpath.v ("./" ^ filename))
     in
-    print_endline "parsed file";
-    let* () = parse_header ~filename hdr_off header in
+    let* header = parse_header ~filename hdr_off header in
+    Format.printf "header:@.%a" pp_header header;
     print_endline ("summary: " ^ summary);
     Ok ()
   in
