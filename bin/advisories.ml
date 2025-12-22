@@ -573,15 +573,225 @@ let parse_file file =
   in
   Ok (String.concat "\n" header, hdr_off, summary, description, body)
 
+module Json = struct
+
+  type severity = {
+    typ : string;
+    score : string;
+  }
+
+  let make_severity typ score = { typ ; score }
+
+  let severity_json =
+    Jsont.Object.map ~kind:"severity" make_severity
+    |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
+    |> Jsont.Object.mem "score" Jsont.string ~enc:(fun { score ; _ } -> score)
+    |> Jsont.Object.finish
+
+  type package = {
+    ecosystem : string ;
+    name : string ;
+    purl : string option ;
+  }
+
+  let make_package ecosystem name purl = { ecosystem ; name ; purl }
+
+  type event = {
+    introduced : string option ;
+    fixed : string option ;
+    last_affected : string option ;
+    limit : string option ;
+  }
+
+  let make_event introduced fixed last_affected limit =
+    { introduced ; fixed ; last_affected ; limit }
+
+  type range = {
+    typ : string ;
+    repo : string ;
+    events : event list ;
+  }
+
+  let make_range typ repo events = { typ ; repo ; events }
+
+  type affected = {
+    package : package ;
+    severity : severity list option ;
+    ranges : range list ;
+    versions : string list option ;
+  }
+
+  let make_affected package severity ranges versions =
+    { package ; severity ; ranges ; versions }
+
+  let affected_json =
+    let package_json =
+      Jsont.Object.map ~kind:"package" make_package
+      |> Jsont.Object.mem "ecosystem" Jsont.string ~enc:(fun { ecosystem ; _ } -> ecosystem)
+      |> Jsont.Object.mem "name" Jsont.string ~enc:(fun { name ; _ } -> name)
+      |> Jsont.Object.mem "purl" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { purl ; _ } -> purl)
+      |> Jsont.Object.finish
+    in
+    let range_json =
+      let event_json =
+        (* for each event, only one member is allowed! *)
+        Jsont.Object.map ~kind:"event" make_event
+        |> Jsont.Object.mem "introduced" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { introduced ; _ } -> introduced)
+        |> Jsont.Object.mem "fixed" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { fixed ; _ } -> fixed)
+        |> Jsont.Object.mem "last_affected" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { last_affected ; _ } -> last_affected)
+        |> Jsont.Object.mem "limit" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { limit ; _ } -> limit)
+        |> Jsont.Object.finish
+      in
+      Jsont.Object.map ~kind:"range" make_range
+      |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
+      |> Jsont.Object.mem "repo" Jsont.string ~enc:(fun { repo ; _ } -> repo)
+      |> Jsont.Object.mem "events" (Jsont.list event_json) ~enc:(fun { events ; _ } -> events)
+      |> Jsont.Object.finish
+      (* database_specific *)
+    in
+    Jsont.Object.map ~kind:"affected" make_affected
+    |> Jsont.Object.mem "package" package_json ~enc:(fun { package ; _ } -> package)
+    |> Jsont.Object.mem "severity" Jsont.(option (list severity_json)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { severity ; _ } -> severity)
+    |> Jsont.Object.mem "ranges" Jsont.(list range_json) ~enc:(fun { ranges ; _ } -> ranges)
+    |> Jsont.Object.mem "versions" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { versions ; _ } -> versions)
+    (* ecosystem_specific ; database_specific *)
+    |> Jsont.Object.finish
+
+  type reference = {
+    typ : string ;
+    url : string ;
+  }
+
+  let make_reference typ url = { typ ; url }
+
+  let reference_json =
+    Jsont.Object.map ~kind:"reference" make_reference
+    |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
+    |> Jsont.Object.mem "url" Jsont.string ~enc:(fun { url ; _ } -> url)
+    |> Jsont.Object.finish
+
+  type credit = {
+    name : string ;
+    contact : string list ;
+    typ : string ;
+  }
+
+  let make_credit name contact typ = { name ; contact ; typ }
+
+  let credit_json =
+    Jsont.Object.map ~kind:"credit" make_credit
+    |> Jsont.Object.mem "name" Jsont.string ~enc:(fun { name ; _ } -> name)
+    |> Jsont.Object.mem "contact" Jsont.(list string) ~enc:(fun { contact ; _ } -> contact)
+    |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
+    |> Jsont.Object.finish
+
+  type osv = {
+    schema_version : string ;
+    id : string ;
+    modified : string ;
+    published : string option ;
+    withdrawn : string option ;
+    aliases : string list option ;
+    upstream : string list option ;
+    related : string list option ;
+    summary : string ;
+    details : string ;
+    severity : severity list option ;
+    affected : affected list ;
+    references : reference list ;
+    credits : credit list ;
+  }
+
+  let make_osv schema_version id modified published withdrawn aliases upstream
+      related summary details severity affected references credits =
+    { schema_version ; id ; modified ; published ; withdrawn ; aliases ;
+      upstream ; related ; summary ; details ; severity ; affected ;
+      references ; credits }
+
+  let osv_json =
+    Jsont.Object.map ~kind:"osv" make_osv
+    |> Jsont.Object.mem "schema_version" Jsont.string ~enc:(fun { schema_version ; _ } -> schema_version)
+    |> Jsont.Object.mem "id" Jsont.string ~enc:(fun { id ; _ } -> id)
+    |> Jsont.Object.mem "modified" Jsont.string ~enc:(fun { modified ; _ } -> modified)
+    |> Jsont.Object.mem "published" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { published ; _ } -> published)
+    |> Jsont.Object.mem "withdrawn" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { withdrawn ; _ } -> withdrawn)
+    |> Jsont.Object.mem "aliases" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { aliases ; _ } -> aliases)
+    |> Jsont.Object.mem "upstream" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { upstream ; _ } -> upstream)
+    |> Jsont.Object.mem "related" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { related ; _ } -> related)
+    |> Jsont.Object.mem "summary" Jsont.string ~enc:(fun { summary ; _ } -> summary)
+    |> Jsont.Object.mem "details" Jsont.string ~enc:(fun { details ; _ } -> details)
+    |> Jsont.Object.mem "severity" Jsont.(option (list severity_json)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { severity ; _ } -> severity)
+    |> Jsont.Object.mem "affected" (Jsont.list affected_json) ~enc:(fun { affected ; _ } -> affected)
+    |> Jsont.Object.mem "references" (Jsont.list reference_json) ~enc:(fun { references ; _ } -> references)
+    |> Jsont.Object.mem "credits" (Jsont.list credit_json) ~enc:(fun { credits ; _ } -> credits)
+    (* database_specific *)
+    |> Jsont.Object.finish
+
+  let osv_to_json ?format osv = Jsont_bytesrw.encode_string ?format osv_json osv
+end
+
+let to_osv { header ; summary ; details } =
+  let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
+        severity ; affected ; events ; references ; credits ; _ } = header
+  in
+  let p_to_s = Ptime.to_rfc3339 ~tz_offset_s:0 in
+  let severity =
+    Option.map (fun (typ, score) -> [ Json.{ typ = String.uppercase_ascii (severity_type_to_string typ) ; score } ])
+      severity
+  in
+  let affected =
+    let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = None (* TODO *) } in
+    let ranges =
+      List.map (fun (range_typ, repo, events) ->
+          let events = List.map (fun (typ, v) ->
+              match typ with
+              | Introduced -> Json.{ introduced = Some v ; fixed = None ; last_affected = None ; limit = None }
+              | Fixed -> Json.{ introduced = None ; fixed = Some v ; last_affected = None ; limit = None }
+              | Last_affected -> Json.{ introduced = None ; fixed = None ; last_affected = Some v ; limit = None })
+              events
+          in
+          Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo; events })
+        events
+    in
+    (* let versions = [] (\* TODO *\) in *)
+    [ Json.{ package ; severity = None ; ranges ; versions = None } ]
+  in
+  let references =
+    List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
+      references
+  in
+  let credits =
+    List.map (fun (typ, name, contact) ->
+        Json.{ name ; contact ; typ = String.uppercase_ascii (credit_type_to_string typ) })
+      credits
+  in
+  Json.{ schema_version = "1.7.4" ;
+         id ;
+         modified = p_to_s modified ;
+         published = Option.map p_to_s published ;
+         withdrawn = Option.map p_to_s withdrawn ;
+         aliases = if aliases = [] then None else Some aliases ;
+         upstream = if upstream = [] then None else Some upstream ;
+         related = if related = [] then None else Some related ;
+         summary ;
+         details ;
+         severity ;
+         affected ;
+         references ;
+         credits ;
+       }
+
 let () =
   let r =
     let filename = "OSEC-2018-1.md" in
-    let* (header, hdr_off, summary, _details, _body) =
+    let* (header, hdr_off, summary, details, _body) =
       parse_file (Fpath.v ("./" ^ filename))
     in
     let* header = parse_header ~filename hdr_off header in
-    Format.printf "header:@.%a" pp_header header;
-    print_endline ("summary: " ^ summary);
+(*    Format.printf "header:@.%a" pp_header header;
+      print_endline ("summary: " ^ summary); *)
+    let osv = to_osv { header ; summary ; details } in
+    print_endline (Result.get_ok (Json.osv_to_json osv));
     Ok ()
   in
   match r with
