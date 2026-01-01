@@ -672,7 +672,7 @@ module Json = struct
 
   type credit = {
     name : string ;
-    contact : string list ;
+    contact : string list option ;
     typ : string ;
   }
 
@@ -681,7 +681,7 @@ module Json = struct
   let credit_json =
     Jsont.Object.map ~kind:"credit" make_credit
     |> Jsont.Object.mem "name" Jsont.string ~enc:(fun { name ; _ } -> name)
-    |> Jsont.Object.mem "contact" Jsont.(list string) ~enc:(fun { contact ; _ } -> contact)
+    |> Jsont.Object.mem "contact" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { contact ; _ } -> contact)
     |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
     |> Jsont.Object.finish
 
@@ -740,7 +740,8 @@ let to_osv { header ; summary ; details } =
       severity
   in
   let affected =
-    let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = None (* TODO *) } in
+    let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
+    let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
     let ranges =
       List.map (fun (range_typ, repo, events) ->
           let events = List.map (fun (typ, v) ->
@@ -762,6 +763,7 @@ let to_osv { header ; summary ; details } =
   in
   let credits =
     List.map (fun (typ, name, contact) ->
+        let contact = if contact = [] then None else Some contact in
         Json.{ name ; contact ; typ = String.uppercase_ascii (credit_type_to_string typ) })
       credits
   in
