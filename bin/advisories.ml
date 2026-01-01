@@ -208,20 +208,6 @@ let parse_severity data =
     (CVSS_V2, data)
 
 let parse_affected pp_err lines data =
-  (* TODO later:
-     we generate the "package - ecosystem: opam, name: pkg_name, purl: purl" from the data
-     below, we also generate the ranges (introduced and fixed)
-     introduced: the things behind the >= constraint
-     fixed: the thing behind the < constraint
-     and we produce the list of versions below (we just put in purl)
-
-  for a given package p and a set of constraints (likely >= and < OR only <):
-    if p = ocaml, run with p = ocaml-variants, p = ocaml-base-compiler, and p = ocaml-system, and p = ocaml-secondary-compiler
-    for each constraint c:
-      opam info '$p$c --all-versions -f version
-    build up the union of the runs
-    for each element u of the union:
-      let purl = pkg://opam/p/u *)
   let open OpamParserTypes.FullPos in
   (* constraints are of the form:
      >= "1" --> Prefix_relop `Geq, String "1"
@@ -573,6 +559,34 @@ let parse_file file =
   in
   Ok (String.concat "\n" header, hdr_off, summary, description, body)
 
+module S = Set.Make(String)
+
+let make_purl name version =
+  let purl = Result.get_ok (Purl.make "opam" name ~version ()) in
+  Purl.to_string purl
+
+let compute_versions name pkg_versions =
+  let compute_versions (relop, version) =
+    let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
+    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--all-versions" % "-f" % "version") in
+    match Bos.OS.Cmd.(to_lines (run_out cmd)) with
+    | Ok x -> Ok x
+    | Error `Msg msg as e -> Logs.err (fun m -> m "command resulted in %s" msg); e
+  in
+  let rec find_versions = function
+    | Atom a -> compute_versions a
+    | And (a, b) ->
+      let* av = find_versions a in
+      let* bv = find_versions b in
+      Ok (S.inter (S.of_list av) (S.of_list bv) |> S.elements)
+    | Or (a, b) ->
+      let* av = find_versions a in
+      let* bv = find_versions b in
+      Ok (S.union (S.of_list av) (S.of_list bv) |> S.elements)
+  in
+  let* versions = find_versions pkg_versions in
+  Ok (List.map (fun v -> make_purl name v) versions)
+
 module Json = struct
 
   type severity = {
@@ -754,8 +768,8 @@ let to_osv { header ; summary ; details } =
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo; events })
         events
     in
-    (* let versions = [] (\* TODO *\) in *)
-    [ Json.{ package ; severity = None ; ranges ; versions = None } ]
+    let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
+    [ Json.{ package ; severity = None ; ranges ; versions = Some versions } ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
