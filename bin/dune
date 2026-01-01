@@ -1,4 +1,4 @@
 (executable
  (name advisories)
  (public_name advisories)
- (libraries cmdliner purl jsont cmarkit bos ptime fmt opam-file-format jsont.bytesrw))
+ (libraries cmdliner purl jsont cmarkit bos ptime fmt fmt.tty fmt.cli opam-file-format jsont.bytesrw logs logs.fmt logs.cli))

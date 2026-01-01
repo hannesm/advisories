@@ -160,7 +160,7 @@ type header = {
   references : reference list ;
   credits : credit list ;
 }
-(* TODO schema_version, full affected, database_specific, multiple severity *)
+
 let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
                     related ; severity ; severity_score ; affected ; events ;
                     references ; credits } =
@@ -781,23 +781,42 @@ let to_osv { header ; summary ; details } =
          credits ;
        }
 
-let () =
-  let r =
-    let filename = "OSEC-2018-1.md" in
-    let* (header, hdr_off, summary, details, _body) =
-      parse_file (Fpath.v ("./" ^ filename))
-    in
-    let* header = parse_header ~filename hdr_off header in
+let jump () filename =
+  let* (header, hdr_off, summary, details, _body) =
+    parse_file (Fpath.v filename)
+  in
+  let* header = parse_header ~filename hdr_off header in
 (*    Format.printf "header:@.%a" pp_header header;
       print_endline ("summary: " ^ summary); *)
-    let osv = to_osv { header ; summary ; details } in
-    print_endline (Result.get_ok (Json.osv_to_json osv));
-    Ok ()
-  in
-  match r with
-  | Ok () -> ()
-  | Error str -> print_endline ("error: " ^ str)
+  let osv = to_osv { header ; summary ; details } in
+  print_endline (Result.get_ok (Json.osv_to_json osv));
+  Ok ()
 
 (* validation:
 check-jsonschema --schemafile osv-schema.json <output.json>
 *)
+
+let setup_log style_renderer level =
+  Fmt_tty.setup_std_outputs ?style_renderer ();
+  Logs.set_level level;
+  Logs.set_reporter (Logs_fmt.reporter ~dst:Format.std_formatter ())
+
+open Cmdliner
+
+let setup_log =
+  Term.(const setup_log
+        $ Fmt_cli.style_renderer ()
+        $ Logs_cli.level ())
+
+let advisory =
+  let doc = "Advisory file" in
+  Arg.(required & pos 0 (some file) None & info [] ~doc ~docv:"FILE")
+
+let cmd =
+  let info = Cmd.info "advisories"
+  and term =
+    Term.(term_result' (const jump $ setup_log $ advisory))
+  in
+  Cmd.v info term
+
+let () = exit (Cmd.eval cmd)
