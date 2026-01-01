@@ -564,7 +564,7 @@ let parse_file file =
         if String.length summary > 120 then
           Error "summary exceeds length of 120 characters"
         else
-          let details = String.concat "\n" tl in
+          let details = String.trim (String.concat "\n" tl) in
           Ok (hdr, hdr_off, summary, details, hd ^ "\n" ^ details)
       | `summary, data ->
         err_msg "expected summary (# <summary>), received: %s" (String.concat "\n" data)
