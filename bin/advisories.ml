@@ -159,11 +159,12 @@ type header = {
   events : event list ;
   references : reference list ;
   credits : credit list ;
+  historical : bool option ;
 }
 
 let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
                     related ; severity ; severity_score ; affected ; events ;
-                    references ; credits } =
+                    references ; credits ; historical } =
   Fmt.pf ppf "  id: %S@." id;
   Fmt.pf ppf "  modified: %a@." (Ptime.pp_rfc3339 ()) modified;
   Fmt.pf ppf "  published: %a@." Fmt.(option ~none:(any "no") (Ptime.pp_rfc3339 ())) published;
@@ -181,7 +182,9 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
     (List.map (fun (rt, r) -> reference_type_to_string rt, r) references);
   Fmt.pf ppf "  credits: %a@."
     Fmt.(list ~sep:(any ", ") (pair ~sep:(any ": ") string string))
-    (List.map (fun (ct, c, _con) -> credit_type_to_string ct, c) credits)
+    (List.map (fun (ct, c, _con) -> credit_type_to_string ct, c) credits);
+  Fmt.pf ppf "  historical: %a@."
+    Fmt.(option ~none:(any "no") bool) historical
 
 type t = {
   header : header ;
@@ -527,8 +530,17 @@ let parse_header ?(filename = "no filename provided") line_offset data =
     | None -> Ok []
     | Some (_, elem) -> parse_credits pp_error get_lines elem
   in
+  let* historical =
+    match SM.find_opt "historical" fields with
+    | None -> Ok None
+    | Some (_, { pelem = Bool v ; _ }) -> Ok (Some v)
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a bool for \"historical\", found %s"
+        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
+  in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-       severity ; severity_score ; affected ; events ; references ; credits }
+       severity ; severity_score ; affected ; events ; references ; credits ;
+       historical }
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -565,7 +577,16 @@ let make_purl name version =
   let purl = Result.get_ok (Purl.make "opam" name ~version ()) in
   Purl.to_string purl
 
-let compute_versions name pkg_versions =
+let compute_versions historical name pkg_versions =
+  let* () =
+    if historical then
+      let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "archive" % "git+https://github.com/ocaml/opam-repository-archive.git") in
+      let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+      match status with
+      | `Exited 0 -> Ok ()
+      | _ -> Error (`Msg "didn't return with 0")
+    else Ok ()
+  in
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
     let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--all-versions" % "-f" % "version") in
@@ -585,6 +606,15 @@ let compute_versions name pkg_versions =
       Ok (S.union (S.of_list av) (S.of_list bv) |> S.elements)
   in
   let* versions = find_versions pkg_versions in
+  let* () =
+    if historical then
+      let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "archive") in
+      let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+      match status with
+      | `Exited 0 -> Ok ()
+      | _ -> Error (`Msg "didn't return with 0")
+    else Ok ()
+  in
   Ok (List.map (fun v -> make_purl name v) versions)
 
 module Json = struct
@@ -699,6 +729,17 @@ module Json = struct
     |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
     |> Jsont.Object.finish
 
+  type database_specific = {
+    historical : bool option ;
+  }
+
+  let make_database_specific historical = { historical }
+
+  let database_specific_json =
+    Jsont.Object.map ~kind:"database_specific" make_database_specific
+    |> Jsont.Object.mem "historical" Jsont.(option bool) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { historical } -> historical)
+    |> Jsont.Object.finish
+
   type osv = {
     schema_version : string ;
     id : string ;
@@ -714,13 +755,14 @@ module Json = struct
     affected : affected list ;
     references : reference list ;
     credits : credit list ;
+    database_specific : database_specific option ;
   }
 
   let make_osv schema_version id modified published withdrawn aliases upstream
-      related summary details severity affected references credits =
+      related summary details severity affected references credits database_specific =
     { schema_version ; id ; modified ; published ; withdrawn ; aliases ;
       upstream ; related ; summary ; details ; severity ; affected ;
-      references ; credits }
+      references ; credits ; database_specific }
 
   let osv_json =
     Jsont.Object.map ~kind:"osv" make_osv
@@ -738,7 +780,7 @@ module Json = struct
     |> Jsont.Object.mem "affected" (Jsont.list affected_json) ~enc:(fun { affected ; _ } -> affected)
     |> Jsont.Object.mem "references" (Jsont.list reference_json) ~enc:(fun { references ; _ } -> references)
     |> Jsont.Object.mem "credits" (Jsont.list credit_json) ~enc:(fun { credits ; _ } -> credits)
-    (* database_specific *)
+    |> Jsont.Object.mem "database_specific" (Jsont.option database_specific_json) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { database_specific ; _ } -> database_specific)
     |> Jsont.Object.finish
 
   let osv_to_json ?format osv = Jsont_bytesrw.encode_string ?format osv_json osv
@@ -746,7 +788,7 @@ end
 
 let to_osv { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-        severity ; affected ; events ; references ; credits ; _ } = header
+        severity ; affected ; events ; references ; credits ; historical ; _ } = header
   in
   let p_to_s = Ptime.to_rfc3339 ~tz_offset_s:0 in
   let severity =
@@ -768,7 +810,7 @@ let to_osv { header ; summary ; details } =
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo; events })
         events
     in
-    let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
+    let versions = Result.get_ok (compute_versions (Option.value ~default:false historical) (fst affected) (snd affected)) in
     [ Json.{ package ; severity = None ; ranges ; versions = Some versions } ]
   in
   let references =
@@ -780,6 +822,10 @@ let to_osv { header ; summary ; details } =
         let contact = if contact = [] then None else Some contact in
         Json.{ name ; contact ; typ = String.uppercase_ascii (credit_type_to_string typ) })
       credits
+  in
+  let database_specific = match historical with
+    | None | Some false -> None
+    | Some true -> Some Json.{ historical = Some true }
   in
   Json.{ schema_version = "1.7.4" ;
          id ;
@@ -795,6 +841,7 @@ let to_osv { header ; summary ; details } =
          affected ;
          references ;
          credits ;
+         database_specific ;
        }
 
 let jump () filename =
