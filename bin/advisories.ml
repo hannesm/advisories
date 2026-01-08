@@ -848,7 +848,7 @@ let to_osv { header ; summary ; details } =
       let stop = String.rindex id '-' in
       String.sub id start (stop - start)
     in
-    let osv = Some (base_url ^ "osv/advisories/" ^ year ^ "/" ^ id ^ ".json") in
+    let osv = Some (base_url ^ "generated-osv/" ^ year ^ "/" ^ id ^ ".json") in
     let human_link = Some (base_url ^ "main/advisories/" ^ year ^ "/" ^ id ^ ".md") in
     Some Json.{ osv ; human_link }
   in
