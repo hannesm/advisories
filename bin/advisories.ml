@@ -566,20 +566,6 @@ let make_purl name version =
   Purl.to_string purl
 
 let compute_versions name pkg_versions =
-  let* () =
-    let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "main" % "git+https://github.com/ocaml/opam-repository.git") in
-    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-    match status with
-    | `Exited 0 -> Ok ()
-    | _ -> Error (`Msg "opam repo add main didn't return with 0")
-  in
-  let* () =
-    let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "archive" % "git+https://github.com/ocaml/opam-repository-archive.git") in
-    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-    match status with
-    | `Exited 0 -> Ok ()
-    | _ -> Error (`Msg "opam repo add archive didn't return with 0")
-  in
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
     let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--all-versions" % "-f" % "version") in
@@ -599,20 +585,6 @@ let compute_versions name pkg_versions =
       Ok (S.union (S.of_list av) (S.of_list bv) |> S.elements)
   in
   let* versions = find_versions pkg_versions in
-  let* () =
-    let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "main") in
-    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-    match status with
-    | `Exited 0 -> Ok ()
-    | _ -> Error (`Msg "opam repo remove main didn't return with 0")
-  in
-  let* () =
-    let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "archive") in
-    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-    match status with
-    | `Exited 0 -> Ok ()
-    | _ -> Error (`Msg "opam repo remove archive didn't return with 0")
-  in
   Ok (List.map (fun v -> make_purl name v) versions)
 
 module Json = struct
