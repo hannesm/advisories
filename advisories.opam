@@ -10,6 +10,7 @@ depends: [
   "dune" {>= "1.0"}
   "cmarkit" {>= "0.3.0"}
   "jsont" {>= "0.2.0"}
+  "bytesrw" {>= "0.3.0"}
   "cmdliner" {>= "2.1.0"}
   "bos" {>= "0.2.1"}
   "ptime" {>= "1.2.0"}
