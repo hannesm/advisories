@@ -159,12 +159,11 @@ type header = {
   events : event list ;
   references : reference list ;
   credits : credit list ;
-  historical : bool option ;
 }
 
 let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
                     related ; severity ; severity_score ; affected ; events ;
-                    references ; credits ; historical } =
+                    references ; credits } =
   Fmt.pf ppf "  id: %S@." id;
   Fmt.pf ppf "  modified: %a@." (Ptime.pp_rfc3339 ()) modified;
   Fmt.pf ppf "  published: %a@." Fmt.(option ~none:(any "no") (Ptime.pp_rfc3339 ())) published;
@@ -183,8 +182,6 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
   Fmt.pf ppf "  credits: %a@."
     Fmt.(list ~sep:(any ", ") (pair ~sep:(any ": ") string string))
     (List.map (fun (ct, c, _con) -> credit_type_to_string ct, c) credits);
-  Fmt.pf ppf "  historical: %a@."
-    Fmt.(option ~none:(any "no") bool) historical
 
 type t = {
   header : header ;
@@ -530,17 +527,8 @@ let parse_header ?(filename = "no filename provided") line_offset data =
     | None -> Ok []
     | Some (_, elem) -> parse_credits pp_error get_lines elem
   in
-  let* historical =
-    match SM.find_opt "historical" fields with
-    | None -> Ok None
-    | Some (_, { pelem = Bool v ; _ }) -> Ok (Some v)
-    | Some (pos, value) ->
-      err_msg "%a@.Expected a bool for \"historical\", found %s"
-        (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
-  in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-       severity ; severity_score ; affected ; events ; references ; credits ;
-       historical }
+       severity ; severity_score ; affected ; events ; references ; credits }
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -577,15 +565,20 @@ let make_purl name version =
   let purl = Result.get_ok (Purl.make "opam" name ~version ()) in
   Purl.to_string purl
 
-let compute_versions historical name pkg_versions =
+let compute_versions name pkg_versions =
   let* () =
-    if historical then
-      let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "archive" % "git+https://github.com/ocaml/opam-repository-archive.git") in
-      let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-      match status with
-      | `Exited 0 -> Ok ()
-      | _ -> Error (`Msg "didn't return with 0")
-    else Ok ()
+    let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "main" % "git+https://github.com/ocaml/opam-repository.git") in
+    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+    match status with
+    | `Exited 0 -> Ok ()
+    | _ -> Error (`Msg "opam repo add main didn't return with 0")
+  in
+  let* () =
+    let cmd = Bos.Cmd.(v "opam" % "repository" % "add" % "archive" % "git+https://github.com/ocaml/opam-repository-archive.git") in
+    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+    match status with
+    | `Exited 0 -> Ok ()
+    | _ -> Error (`Msg "opam repo add archive didn't return with 0")
   in
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
@@ -607,13 +600,18 @@ let compute_versions historical name pkg_versions =
   in
   let* versions = find_versions pkg_versions in
   let* () =
-    if historical then
-      let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "archive") in
-      let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
-      match status with
-      | `Exited 0 -> Ok ()
-      | _ -> Error (`Msg "didn't return with 0")
-    else Ok ()
+    let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "main") in
+    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+    match status with
+    | `Exited 0 -> Ok ()
+    | _ -> Error (`Msg "opam repo remove main didn't return with 0")
+  in
+  let* () =
+    let cmd = Bos.Cmd.(v "opam" % "repository" % "remove" % "archive") in
+    let* status = Bos.OS.Cmd.(run_status ~quiet:true cmd) in
+    match status with
+    | `Exited 0 -> Ok ()
+    | _ -> Error (`Msg "opam repo remove archive didn't return with 0")
   in
   Ok (List.map (fun v -> make_purl name v) versions)
 
@@ -658,15 +656,22 @@ module Json = struct
 
   let make_range typ repo events = { typ ; repo ; events }
 
+  type ecosystem_specific = {
+    opam_constraint : string option ;
+  }
+
+  let make_ecosystem_specific opam_constraint = { opam_constraint }
+
   type affected = {
     package : package ;
     severity : severity list option ;
     ranges : range list ;
     versions : string list option ;
+    ecosystem_specific : ecosystem_specific option ;
   }
 
-  let make_affected package severity ranges versions =
-    { package ; severity ; ranges ; versions }
+  let make_affected package severity ranges versions ecosystem_specific =
+    { package ; severity ; ranges ; versions ; ecosystem_specific }
 
   let affected_json =
     let package_json =
@@ -693,12 +698,18 @@ module Json = struct
       |> Jsont.Object.finish
       (* database_specific *)
     in
+    let ecosystem_specific_json =
+      Jsont.Object.map ~kind:"ecosystem_specific" make_ecosystem_specific
+      |> Jsont.Object.mem "opam_constraint" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { opam_constraint } -> opam_constraint)
+      |> Jsont.Object.finish
+    in
     Jsont.Object.map ~kind:"affected" make_affected
     |> Jsont.Object.mem "package" package_json ~enc:(fun { package ; _ } -> package)
     |> Jsont.Object.mem "severity" Jsont.(option (list severity_json)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { severity ; _ } -> severity)
     |> Jsont.Object.mem "ranges" Jsont.(list range_json) ~enc:(fun { ranges ; _ } -> ranges)
     |> Jsont.Object.mem "versions" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { versions ; _ } -> versions)
-    (* ecosystem_specific ; database_specific *)
+    |> Jsont.Object.mem "ecosystem_specific" Jsont.(option ecosystem_specific_json) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { ecosystem_specific ; _ } -> ecosystem_specific)
+    (* database_specific *)
     |> Jsont.Object.finish
 
   type reference = {
@@ -730,14 +741,17 @@ module Json = struct
     |> Jsont.Object.finish
 
   type database_specific = {
-    historical : bool option ;
+    osv : string option ;
+    human_link : string option ;
   }
 
-  let make_database_specific historical = { historical }
+  let make_database_specific osv human_link =
+    { osv ; human_link }
 
   let database_specific_json =
     Jsont.Object.map ~kind:"database_specific" make_database_specific
-    |> Jsont.Object.mem "historical" Jsont.(option bool) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { historical } -> historical)
+    |> Jsont.Object.mem "osv" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { osv ; _ } -> osv)
+    |> Jsont.Object.mem "human_link" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { human_link ; _ } -> human_link)
     |> Jsont.Object.finish
 
   type osv = {
@@ -788,7 +802,7 @@ end
 
 let to_osv { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-        severity ; affected ; events ; references ; credits ; historical ; _ } = header
+        severity ; affected ; events ; references ; credits ; _ } = header
   in
   let p_to_s = Ptime.to_rfc3339 ~tz_offset_s:0 in
   let severity =
@@ -810,8 +824,12 @@ let to_osv { header ; summary ; details } =
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo; events })
         events
     in
-    let versions = Result.get_ok (compute_versions (Option.value ~default:false historical) (fst affected) (snd affected)) in
-    [ Json.{ package ; severity = None ; ranges ; versions = Some versions } ]
+    let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
+    let opam_constraint =
+      Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
+    in
+    let ecosystem_specific = Some Json.{ opam_constraint } in
+    [ Json.{ package ; severity = None ; ranges ; versions = Some versions ; ecosystem_specific } ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
@@ -823,9 +841,16 @@ let to_osv { header ; summary ; details } =
         Json.{ name ; contact ; typ = String.uppercase_ascii (credit_type_to_string typ) })
       credits
   in
-  let database_specific = match historical with
-    | None | Some false -> None
-    | Some true -> Some Json.{ historical = Some true }
+  let database_specific =
+    let base_url = "https://github.com/ocaml/security-advisories/tree/" in
+    let year =
+      let start = String.index id '-' + 1 in
+      let stop = String.rindex id '-' in
+      String.sub id start (stop - start)
+    in
+    let osv = Some (base_url ^ "osv/" ^ year ^ "/" ^ id ^ ".json") in
+    let human_link = Some (base_url ^ "main/" ^ year ^ "/" ^ id ^ ".md") in
+    Some Json.{ osv ; human_link }
   in
   Json.{ schema_version = "1.7.4" ;
          id ;
