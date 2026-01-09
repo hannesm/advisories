@@ -787,23 +787,35 @@ let to_osv { header ; summary ; details } =
   let affected =
     let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
     let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
-    let opam_range =
-      let rec aff_to_events acc = function
-        | Atom (`Lt, ver) -> range_typ_to_range ~fixed:ver () :: acc
-        | Atom (`Leq, ver) -> range_typ_to_range ~last_affected:ver () :: acc
-        | Atom (`Geq, ver) -> range_typ_to_range ~introduced:ver () :: acc
-        | Atom pkg ->
-          failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
-        | And (a, b) -> aff_to_events (aff_to_events acc a) b
-        | Or (a, b) -> aff_to_events (aff_to_events acc a) b
+    let opam_ranges =
+      let atom_to_event = function
+        | `Lt, ver -> range_typ_to_range ~fixed:ver ()
+        | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
+        | `Geq, ver -> range_typ_to_range ~introduced:ver ()
+        | pkg -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
       in
-      let events = aff_to_events [] (snd affected) in
-      let events =
+      let add_introduce events =
         match List.find_opt (function Json.{ introduced = Some _; _ } -> true | _ -> false) events with
         | None -> range_typ_to_range ~introduced:"0" () :: events
-        | Some _ -> events
+        | Some _ -> List.rev events
       in
-      Json.{ typ = "ECOSYSTEM" ; repo = None ; events }
+      let rec aff_to_events (ranges, events) = function
+        | Atom pkg -> (ranges, atom_to_event pkg :: events)
+        | And (a, b) ->
+          aff_to_events (aff_to_events (ranges, events) a) b
+        | Or (a, b) ->
+          assert (events = []);
+          let (ranges, events_a) = aff_to_events (ranges, []) a in
+          let (ranges, events_b) = aff_to_events (ranges, []) b in
+          (Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_a } ::
+           Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_b } ::
+           ranges,
+           [])
+      in
+      let ranges, events = aff_to_events ([], []) (snd affected) in
+      match events with
+      | [] -> ranges
+      | _ -> Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events } :: ranges
     in
     let ranges =
       List.map (fun (range_typ, repo, events) ->
@@ -822,7 +834,7 @@ let to_osv { header ; summary ; details } =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
     in
     let ecosystem_specific = Some Json.{ opam_constraint } in
-    [ Json.{ package ; severity = None ; ranges = opam_range :: ranges ; versions = Some versions ; ecosystem_specific } ]
+    [ Json.{ package ; severity = None ; ranges = opam_ranges @ ranges ; versions = Some versions ; ecosystem_specific } ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
