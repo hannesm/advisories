@@ -622,7 +622,7 @@ module Json = struct
 
   type range = {
     typ : string ;
-    repo : string ;
+    repo : string option ;
     events : event list ;
   }
 
@@ -665,7 +665,7 @@ module Json = struct
       in
       Jsont.Object.map ~kind:"range" make_range
       |> Jsont.Object.mem "type" Jsont.string ~enc:(fun { typ ; _ } -> typ)
-      |> Jsont.Object.mem "repo" Jsont.string ~enc:(fun { repo ; _ } -> repo)
+      |> Jsont.Object.mem "repo" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { repo ; _ } -> repo)
       |> Jsont.Object.mem "events" (Jsont.list event_json) ~enc:(fun { events ; _ } -> events)
       |> Jsont.Object.finish
       (* database_specific *)
@@ -772,6 +772,9 @@ module Json = struct
   let osv_to_json ?format osv = Jsont_bytesrw.encode_string ?format osv_json osv
 end
 
+let range_typ_to_range ?introduced ?fixed ?last_affected () =
+  Json.{ introduced ; fixed ; last_affected ; limit = None }
+
 let to_osv { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
         severity ; affected ; events ; references ; credits ; _ } = header
@@ -784,16 +787,34 @@ let to_osv { header ; summary ; details } =
   let affected =
     let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
     let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
+    let opam_range =
+      let rec aff_to_events acc = function
+        | Atom (`Lt, ver) -> range_typ_to_range ~fixed:ver () :: acc
+        | Atom (`Leq, ver) -> range_typ_to_range ~last_affected:ver () :: acc
+        | Atom (`Geq, ver) -> range_typ_to_range ~introduced:ver () :: acc
+        | Atom pkg ->
+          failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
+        | And (a, b) -> aff_to_events (aff_to_events acc a) b
+        | Or (a, b) -> aff_to_events (aff_to_events acc a) b
+      in
+      let events = aff_to_events [] (snd affected) in
+      let events =
+        match List.find_opt (function Json.{ introduced = Some _; _ } -> true | _ -> false) events with
+        | None -> range_typ_to_range ~introduced:"0" () :: events
+        | Some _ -> events
+      in
+      Json.{ typ = "ECOSYSTEM" ; repo = None ; events }
+    in
     let ranges =
       List.map (fun (range_typ, repo, events) ->
           let events = List.map (fun (typ, v) ->
               match typ with
-              | Introduced -> Json.{ introduced = Some v ; fixed = None ; last_affected = None ; limit = None }
-              | Fixed -> Json.{ introduced = None ; fixed = Some v ; last_affected = None ; limit = None }
-              | Last_affected -> Json.{ introduced = None ; fixed = None ; last_affected = Some v ; limit = None })
+              | Introduced -> range_typ_to_range ~introduced:v ()
+              | Fixed -> range_typ_to_range ~fixed:v ()
+              | Last_affected -> range_typ_to_range ~last_affected:v ())
               events
           in
-          Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo; events })
+          Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo = Some repo ; events })
         events
     in
     let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
@@ -801,7 +822,7 @@ let to_osv { header ; summary ; details } =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
     in
     let ecosystem_specific = Some Json.{ opam_constraint } in
-    [ Json.{ package ; severity = None ; ranges ; versions = Some versions ; ecosystem_specific } ]
+    [ Json.{ package ; severity = None ; ranges = opam_range :: ranges ; versions = Some versions ; ecosystem_specific } ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
