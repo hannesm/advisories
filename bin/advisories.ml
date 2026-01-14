@@ -787,17 +787,17 @@ let to_osv { header ; summary ; details } =
   let affected =
     let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
     let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
+    let add_introduce events =
+      match List.find_opt (function Json.{ introduced = Some _; _ } -> true | _ -> false) events with
+      | None -> range_typ_to_range ~introduced:"0" () :: events
+      | Some _ -> List.rev events
+    in
     let opam_ranges =
       let atom_to_event = function
         | `Lt, ver -> range_typ_to_range ~fixed:ver ()
         | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
         | `Geq, ver -> range_typ_to_range ~introduced:ver ()
         | pkg -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
-      in
-      let add_introduce events =
-        match List.find_opt (function Json.{ introduced = Some _; _ } -> true | _ -> false) events with
-        | None -> range_typ_to_range ~introduced:"0" () :: events
-        | Some _ -> List.rev events
       in
       let rec aff_to_events (ranges, events) = function
         | Atom pkg -> (ranges, atom_to_event pkg :: events)
@@ -826,6 +826,7 @@ let to_osv { header ; summary ; details } =
               | Last_affected -> range_typ_to_range ~last_affected:v ())
               events
           in
+          let events = add_introduce events in
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo = Some repo ; events })
         events
     in
