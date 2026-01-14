@@ -159,11 +159,12 @@ type header = {
   events : event list ;
   references : reference list ;
   credits : credit list ;
+  cwe : string list ;
 }
 
 let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
                     related ; severity ; severity_score ; affected ; events ;
-                    references ; credits } =
+                    references ; credits ; cwe } =
   Fmt.pf ppf "  id: %S@." id;
   Fmt.pf ppf "  modified: %a@." (Ptime.pp_rfc3339 ()) modified;
   Fmt.pf ppf "  published: %a@." Fmt.(option ~none:(any "no") (Ptime.pp_rfc3339 ())) published;
@@ -182,6 +183,7 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
   Fmt.pf ppf "  credits: %a@."
     Fmt.(list ~sep:(any ", ") (pair ~sep:(any ": ") string string))
     (List.map (fun (ct, c, _con) -> credit_type_to_string ct, c) credits);
+  Fmt.pf ppf "  cwe: %a@." Fmt.(list ~sep:(any ", ") string) cwe
 
 type t = {
   header : header ;
@@ -527,8 +529,11 @@ let parse_header ?(filename = "no filename provided") line_offset data =
     | None -> Ok []
     | Some (_, elem) -> parse_credits pp_error get_lines elem
   in
+  let* cwe =
+    parse_opt_id_list ~context:"cwe" (SM.find_opt "cwe" fields)
+  in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-       severity ; severity_score ; affected ; events ; references ; credits }
+       severity ; severity_score ; affected ; events ; references ; credits ; cwe }
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -715,15 +720,17 @@ module Json = struct
   type database_specific = {
     osv : string option ;
     human_link : string option ;
+    cwe : string list option ;
   }
 
-  let make_database_specific osv human_link =
-    { osv ; human_link }
+  let make_database_specific osv human_link cwe =
+    { osv ; human_link ; cwe }
 
   let database_specific_json =
     Jsont.Object.map ~kind:"database_specific" make_database_specific
     |> Jsont.Object.mem "osv" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { osv ; _ } -> osv)
     |> Jsont.Object.mem "human_link" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { human_link ; _ } -> human_link)
+    |> Jsont.Object.mem "cwe" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { cwe ; _ } -> cwe)
     |> Jsont.Object.finish
 
   type osv = {
@@ -777,7 +784,7 @@ let range_typ_to_range ?introduced ?fixed ?last_affected () =
 
 let to_osv { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-        severity ; affected ; events ; references ; credits ; _ } = header
+        severity ; affected ; events ; references ; credits ; cwe ; _ } = header
   in
   let p_to_s = Ptime.to_rfc3339 ~tz_offset_s:0 in
   let severity =
@@ -856,7 +863,8 @@ let to_osv { header ; summary ; details } =
     in
     let osv = Some (base_url ^ "generated-osv/" ^ year ^ "/" ^ id ^ ".json") in
     let human_link = Some (base_url ^ "main/advisories/" ^ year ^ "/" ^ id ^ ".md") in
-    Some Json.{ osv ; human_link }
+    let cwe = match cwe with [] -> None | xs -> Some xs in
+    Some Json.{ osv ; human_link ; cwe }
   in
   Json.{ schema_version = "1.7.4" ;
          id ;
