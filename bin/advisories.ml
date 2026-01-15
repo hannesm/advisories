@@ -573,7 +573,7 @@ let make_purl name version =
 let compute_versions name pkg_versions =
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
-    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--all-versions" % "-f" % "version") in
+    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
     match Bos.OS.Cmd.(to_lines (run_out cmd)) with
     | Ok x -> Ok x
     | Error `Msg msg as e -> Logs.err (fun m -> m "command resulted in %s" msg); e
