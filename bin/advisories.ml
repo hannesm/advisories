@@ -566,31 +566,75 @@ let parse_file file =
 
 module S = Set.Make(String)
 
-let make_purl name version =
-  let purl = Result.get_ok (Purl.make "opam" name ~version ()) in
+let make_purl ?repository name version =
+  let qualifiers = match repository with
+    | None -> None
+    | Some repo -> Some ("repository=" ^ repo)
+  in
+  let purl = Result.get_ok (Purl.make "opam" name ~version ?qualifiers ()) in
   Purl.to_string purl
 
 let compute_versions name pkg_versions =
+  let* repositories =
+    let cmd = Bos.Cmd.(v "opam" % "repository" % "list" % "--color=never") in
+    match Bos.OS.Cmd.(to_lines (run_out ~err:err_null cmd)) with
+    | Error _ as e -> e
+    | Ok repos ->
+      Ok (List.fold_left (fun acc repo ->
+          match String.split_on_char ' ' repo |> List.filter_map (fun s -> if s = "" then None else Some s) with
+          | _prio :: name :: url :: [] ->
+            let url =
+              if String.equal "git+https://github.com/ocaml/opam-repository" url ||
+                 String.equal "git+https://github.com/ocaml/opam-repository.git" url ||
+                 String.equal "git+https://github.com/ocaml/opam-repository.git#master" url ||
+                 String.equal "https://github.com/ocaml/opam-repository" url ||
+                 String.equal "https://github.com/ocaml/opam-repository.git" url ||
+                 String.equal "https://github.com/ocaml/opam-repository.git#master" url ||
+                 String.equal "https://opam.ocaml.org" url
+              then
+                None
+              else
+                Some url
+            in
+            (name, url) :: acc
+          | _ -> acc)
+        [] repos)
+  in
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
     let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
     match Bos.OS.Cmd.(to_lines (run_out cmd)) with
-    | Ok x -> Ok x
-    | Error `Msg msg as e -> Logs.err (fun m -> m "command resulted in %s" msg); e
+    | Error `Msg msg as e ->
+      Logs.err (fun m -> m "command %a resulted in %s" Bos.Cmd.pp cmd msg); e
+    | Ok x ->
+      let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "repository") in
+      match Bos.OS.Cmd.(to_lines (run_out cmd)) with
+      | Ok repos ->
+        Ok (List.combine x (List.map (fun r -> List.assoc r repositories) repos))
+      | Error `Msg msg as e ->
+        Logs.err (fun m -> m "command %a resulted in %s" Bos.Cmd.pp cmd msg); e
   in
   let rec find_versions = function
     | Atom a -> compute_versions a
     | And (a, b) ->
       let* av = find_versions a in
       let* bv = find_versions b in
-      Ok (S.inter (S.of_list av) (S.of_list bv) |> S.elements)
+      let versions = S.inter (S.of_list (List.map fst av)) (S.of_list (List.map fst bv)) |> S.elements in
+      Ok (List.map (fun v -> v, List.assoc v av) versions)
     | Or (a, b) ->
       let* av = find_versions a in
       let* bv = find_versions b in
-      Ok (S.union (S.of_list av) (S.of_list bv) |> S.elements)
+      let versions = S.union (S.of_list (List.map fst av)) (S.of_list (List.map fst bv)) |> S.elements in
+      let a_or_b v =
+        match List.assoc_opt v av, List.assoc_opt v bv with
+        | None, None -> assert false
+        | Some a, _ -> a
+        | None, Some b -> b
+      in
+      Ok (List.map (fun v -> v, a_or_b v) versions)
   in
   let* versions = find_versions pkg_versions in
-  Ok (List.map (fun v -> make_purl name v) versions)
+  Ok (List.map (fun (v, repository) -> make_purl ?repository name v) versions)
 
 module Json = struct
 
