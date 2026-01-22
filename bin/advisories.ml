@@ -566,14 +566,6 @@ let parse_file file =
 
 module S = Set.Make(String)
 
-let make_purl ?repository name version =
-  let qualifiers = match repository with
-    | None -> None
-    | Some repo -> Some ("repository=" ^ repo)
-  in
-  let purl = Result.get_ok (Purl.make "opam" name ~version ?qualifiers ()) in
-  Purl.to_string purl
-
 let compute_versions name pkg_versions =
   let compute_versions (relop, version) =
     let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
