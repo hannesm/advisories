@@ -155,6 +155,7 @@ type header = {
   related : string list ;
   severity : (severity_type * string) option;
   severity_score : string option ;
+  affected_bindings : string list ;
   affected : string * pkg_versions ;
   events : event list ;
   references : reference list ;
@@ -163,8 +164,8 @@ type header = {
 }
 
 let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
-                    related ; severity ; severity_score ; affected ; events ;
-                    references ; credits ; cwe } =
+                    related ; severity ; severity_score ; affected_bindings ;
+                    affected ; events ; references ; credits ; cwe } =
   Fmt.pf ppf "  id: %S@." id;
   Fmt.pf ppf "  modified: %a@." (Ptime.pp_rfc3339 ()) modified;
   Fmt.pf ppf "  published: %a@." Fmt.(option ~none:(any "no") (Ptime.pp_rfc3339 ())) published;
@@ -175,6 +176,7 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
   Fmt.pf ppf "  severity: %a@." Fmt.(option ~none:(any "no") (pair ~sep:(any ", ") string string))
     (Option.map (fun (t, s) -> severity_type_to_string t, s) severity);
   Fmt.pf ppf "  severity_score: %a@." Fmt.(option ~none:(any "no") string) severity_score;
+  Fmt.pf ppf "  affected_bindings: %a@." Fmt.(list ~sep:(any ", ") string) affected_bindings;
   Fmt.pf ppf "  affected: %S %a@." (fst affected) pp_pkg_versions (snd affected);
   Fmt.pf ppf "  events: %a@." Fmt.(list ~sep:(any ", ") pp_event) events;
   Fmt.pf ppf "  references: %a@."
@@ -434,6 +436,26 @@ let parse_header ?(filename = "no filename provided") line_offset data =
       err_msg "%a@.Expected a list of identifiers (or a single identifier) for %S, found %s"
         (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value value)
   in
+  let parse_opt_string_list ~context = function
+    | None -> Ok []
+    | Some (_, { pelem = List { pelem = vs ; _ } ; _ }) ->
+      let* vs =
+        List.fold_left (fun acc v ->
+            let* acc in
+            match v with
+            | { pelem = String id ; _ } -> Ok (id :: acc)
+            | { pos ; _ } as v ->
+              err_msg "%a@.Expected a list of strings for %S, found %s"
+                (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value v))
+          (Ok []) vs
+      in
+      Ok (List.rev vs)
+    | Some (_, { pelem = String id ; _ }) ->
+      Ok [ id ]
+    | Some (pos, value) ->
+      err_msg "%a@.Expected a list of strings (or a single string) for %S, found %s"
+        (pp_error pos) (get_lines pos) context (OpamPrinter.FullPos.value value)
+  in
   (* opamfile_item list (with source position) *)
   let* fields =
     List.fold_left (fun map v ->
@@ -506,6 +528,10 @@ let parse_header ?(filename = "no filename provided") line_offset data =
       err_msg "%a@.Expected a string for \"severity_score\", found %s"
         (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
+  let* affected_bindings =
+    parse_opt_string_list ~context:"affected functions"
+      (SM.find_opt "affected_bindings" fields)
+  in
   let* affected =
     match SM.find_opt "affected" fields with
     | None -> err_msg "expected something being affected"
@@ -533,7 +559,8 @@ let parse_header ?(filename = "no filename provided") line_offset data =
     parse_opt_id_list ~context:"cwe" (SM.find_opt "cwe" fields)
   in
   Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-       severity ; severity_score ; affected ; events ; references ; credits ; cwe }
+       severity ; severity_score ; affected_bindings ; affected ; events ;
+       references ; credits ; cwe }
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -633,9 +660,11 @@ module Json = struct
 
   type ecosystem_specific = {
     opam_constraint : string option ;
+    affected_bindings : string list option ;
   }
 
-  let make_ecosystem_specific opam_constraint = { opam_constraint }
+  let make_ecosystem_specific opam_constraint affected_bindings =
+    { opam_constraint ; affected_bindings }
 
   type affected = {
     package : package ;
@@ -675,7 +704,8 @@ module Json = struct
     in
     let ecosystem_specific_json =
       Jsont.Object.map ~kind:"ecosystem_specific" make_ecosystem_specific
-      |> Jsont.Object.mem "opam_constraint" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { opam_constraint } -> opam_constraint)
+      |> Jsont.Object.mem "opam_constraint" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { opam_constraint ; _ } -> opam_constraint)
+      |> Jsont.Object.mem "affected_bindings" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { affected_bindings ; _ } -> affected_bindings)
       |> Jsont.Object.finish
     in
     Jsont.Object.map ~kind:"affected" make_affected
@@ -782,7 +812,8 @@ let range_typ_to_range ?introduced ?fixed ?last_affected () =
 
 let to_osv { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-        severity ; affected ; events ; references ; credits ; cwe ; _ } = header
+        severity ; affected_bindings ; affected ; events ; references ;
+        credits ; cwe ; _ } = header
   in
   let p_to_s = Ptime.to_rfc3339 ~tz_offset_s:0 in
   let severity =
@@ -839,7 +870,12 @@ let to_osv { header ; summary ; details } =
     let opam_constraint =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
     in
-    let ecosystem_specific = Some Json.{ opam_constraint } in
+    let affected_bindings =
+      match affected_bindings with
+      | [] -> None
+      | cs -> Some cs
+    in
+    let ecosystem_specific = Some Json.{ opam_constraint ; affected_bindings } in
     [ Json.{ package ; severity = None ; ranges = opam_ranges @ ranges ; versions = Some versions ; ecosystem_specific } ]
   in
   let references =
