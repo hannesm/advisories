@@ -660,7 +660,7 @@ module Json = struct
 
   type ecosystem_specific = {
     opam_constraint : string option ;
-    affected_bindings : string list option ;
+    affected_bindings : string list ;
   }
 
   let make_ecosystem_specific opam_constraint affected_bindings =
@@ -705,7 +705,7 @@ module Json = struct
     let ecosystem_specific_json =
       Jsont.Object.map ~kind:"ecosystem_specific" make_ecosystem_specific
       |> Jsont.Object.mem "opam_constraint" Jsont.(option string) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { opam_constraint ; _ } -> opam_constraint)
-      |> Jsont.Object.mem "affected_bindings" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { affected_bindings ; _ } -> affected_bindings)
+      |> Jsont.Object.mem "affected_bindings" Jsont.(list string) ~dec_absent:[] ~enc_omit:(function [] -> true | _ -> false) ~enc:(fun { affected_bindings ; _ } -> affected_bindings)
       |> Jsont.Object.finish
     in
     Jsont.Object.map ~kind:"affected" make_affected
@@ -869,11 +869,6 @@ let to_osv { header ; summary ; details } =
     let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
     let opam_constraint =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
-    in
-    let affected_bindings =
-      match affected_bindings with
-      | [] -> None
-      | cs -> Some cs
     in
     let ecosystem_specific = Some Json.{ opam_constraint ; affected_bindings } in
     [ Json.{ package ; severity = None ; ranges = opam_ranges @ ranges ; versions = Some versions ; ecosystem_specific } ]
