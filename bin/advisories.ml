@@ -508,6 +508,24 @@ let parse_header ~filename line_offset data =
     | Some x -> Result.map (fun ts -> Some ts) (parse_date ~context:"published" x)
     | None -> Ok None
   in
+  let* () =
+    let now = Ptime_clock.now () in
+    let* () =
+      match published with
+      | None -> Ok ()
+      | Some pub ->
+        if Ptime.is_later ~than:modified pub then
+          Error "published is after modified"
+        else if Ptime.is_earlier ~than:pub now then
+          Error "published is before now"
+        else
+          Ok ()
+    in
+    if Ptime.is_earlier ~than:modified now then
+      Error "modified is before now"
+    else
+      Ok ()
+  in
   let* withdrawn =
     match SM.find_opt "withdrawn" fields with
     | Some ts -> Result.map (fun ts -> Some ts) (parse_date ~context:"withdrawn" ts)
