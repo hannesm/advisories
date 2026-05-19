@@ -398,7 +398,7 @@ let expected_fields = [
   "references"; "credits"; "cwe"
 ]
 
-let parse_header ?(filename = "no filename provided") line_offset data =
+let parse_header ~filename line_offset data =
   let open OpamParserTypes.FullPos in
   let* opamfile =
     try Ok (OpamParser.FullPos.string data filename)
@@ -489,6 +489,12 @@ let parse_header ?(filename = "no filename provided") line_offset data =
     | pos, value ->
       err_msg "%a@.Expected an identifier for \"id\", found %s"
         (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
+  in
+  let* () =
+    if not (String.equal id (Filename.basename filename) || String.equal id Filename.(remove_extension (basename filename))) then
+      Error ("id \"" ^ id ^ "\" and filename \"" ^ Filename.basename filename ^ "\" do not match")
+    else
+      Ok ()
   in
   let* modified =
     let* ts =
