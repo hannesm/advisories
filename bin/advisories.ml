@@ -392,6 +392,12 @@ let pp_error line_offset pos ppf lines =
     (snd start) (snd stop)
     (pp_lines (fst start + line_offset)) lines
 
+let expected_fields = [
+  "id"; "modified"; "published"; "withdrawn"; "aliases"; "upstream"; "related";
+  "severity"; "severity_score"; "affected_bindings"; "affected"; "events";
+  "references"; "credits"; "cwe"
+]
+
 let parse_header ?(filename = "no filename provided") line_offset data =
   let open OpamParserTypes.FullPos in
   let* opamfile =
@@ -529,7 +535,7 @@ let parse_header ?(filename = "no filename provided") line_offset data =
         (pp_error pos) (get_lines pos) (OpamPrinter.FullPos.value value)
   in
   let* affected_bindings =
-    parse_opt_string_list ~context:"affected functions"
+    parse_opt_string_list ~context:"affected bindings"
       (SM.find_opt "affected_bindings" fields)
   in
   let* affected =
@@ -558,9 +564,18 @@ let parse_header ?(filename = "no filename provided") line_offset data =
   let* cwe =
     parse_opt_id_list ~context:"cwe" (SM.find_opt "cwe" fields)
   in
-  Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
-       severity ; severity_score ; affected_bindings ; affected ; events ;
-       references ; credits ; cwe }
+  let other_keys =
+    SM.fold (fun key _ acc ->
+        if List.mem key expected_fields then acc else key :: acc)
+      fields []
+  in
+  match other_keys with
+  | [] ->
+    Ok { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
+         severity ; severity_score ; affected_bindings ; affected ; events ;
+         references ; credits ; cwe }
+  | ks ->
+    Error ("unknown and unhandled key or keys: " ^ String.concat "," ks)
 
 let parse_file file =
   let* data = Result.map_error (function `Msg msg -> msg) (Bos.OS.File.read file) in
@@ -810,7 +825,7 @@ end
 let range_typ_to_range ?introduced ?fixed ?last_affected () =
   Json.{ introduced ; fixed ; last_affected ; limit = None }
 
-let to_osv { header ; summary ; details } =
+let to_osv ~no_call_opam { header ; summary ; details } =
   let { id ; modified ; published ; withdrawn ; aliases ; upstream ; related ;
         severity ; affected_bindings ; affected ; events ; references ;
         credits ; cwe ; _ } = header
@@ -866,7 +881,12 @@ let to_osv { header ; summary ; details } =
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo = Some repo ; events })
         events
     in
-    let versions = Result.get_ok (compute_versions (fst affected) (snd affected)) in
+    let versions =
+      if no_call_opam then
+        []
+      else
+        Result.get_ok (compute_versions (fst affected) (snd affected))
+    in
     let opam_constraint =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
     in
@@ -912,14 +932,14 @@ let to_osv { header ; summary ; details } =
          database_specific ;
        }
 
-let jump () filename =
+let jump () no_call_opam filename =
   let* (header, hdr_off, summary, details, _body) =
     parse_file (Fpath.v filename)
   in
   let* header = parse_header ~filename hdr_off header in
 (*    Format.printf "header:@.%a" pp_header header;
       print_endline ("summary: " ^ summary); *)
-  let osv = to_osv { header ; summary ; details } in
+  let osv = to_osv ~no_call_opam { header ; summary ; details } in
   print_endline (Result.get_ok (Json.osv_to_json osv));
   Ok ()
 
@@ -939,6 +959,10 @@ let setup_log =
         $ Fmt_cli.style_renderer ()
         $ Logs_cli.level ())
 
+let no_call_opam =
+  let doc = "Do not call opam for figuring out versions" in
+  Arg.(value & flag & info [ "no-opam" ] ~doc)
+
 let advisory =
   let doc = "Advisory file" in
   Arg.(required & pos 0 (some file) None & info [] ~doc ~docv:"FILE")
@@ -946,7 +970,7 @@ let advisory =
 let cmd =
   let info = Cmd.info "advisories"
   and term =
-    Term.(term_result' (const jump $ setup_log $ advisory))
+    Term.(term_result' (const jump $ setup_log $ no_call_opam $ advisory))
   in
   Cmd.v info term
 
