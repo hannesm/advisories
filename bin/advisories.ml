@@ -942,7 +942,10 @@ let jump () no_call_opam filename =
   let* (header, hdr_off, summary, details, _body) =
     parse_file (Fpath.v filename)
   in
-  let* header = parse_header ~filename hdr_off header in
+  let* header =
+    Result.map_error (fun s -> filename ^ ": " ^ s)
+      (parse_header ~filename hdr_off header)
+  in
 (*    Format.printf "header:@.%a" pp_header header;
       print_endline ("summary: " ^ summary); *)
   let osv = to_osv ~no_call_opam { header ; summary ; details } in
