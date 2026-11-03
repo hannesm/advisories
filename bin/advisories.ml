@@ -706,7 +706,7 @@ module Json = struct
     { opam_constraint ; affected_bindings }
 
   type affected = {
-    package : package ;
+    package : package option ;
     severity : severity list option ;
     ranges : range list ;
     versions : string list option ;
@@ -748,7 +748,7 @@ module Json = struct
       |> Jsont.Object.finish
     in
     Jsont.Object.map ~kind:"affected" make_affected
-    |> Jsont.Object.mem "package" package_json ~enc:(fun { package ; _ } -> package)
+    |> Jsont.Object.mem "package" Jsont.(option package_json) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { package ; _ } -> package)
     |> Jsont.Object.mem "severity" Jsont.(option (list severity_json)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { severity ; _ } -> severity)
     |> Jsont.Object.mem "ranges" Jsont.(list range_json) ~enc:(fun { ranges ; _ } -> ranges)
     |> Jsont.Object.mem "versions" Jsont.(option (list string)) ~dec_absent:None ~enc_omit:Option.is_none ~enc:(fun { versions ; _ } -> versions)
@@ -892,7 +892,10 @@ let to_osv ~no_call_opam { header ; summary ; details } =
       | [] -> ranges
       | _ -> Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events } :: ranges
     in
-    let ranges =
+    let git_ranges, ranges =
+      List.partition (fun (range_typ, _, _) -> range_typ = Git) events
+    in
+    let to_ranges =
       List.map (fun (range_typ, repo, events) ->
           let events = List.map (fun (typ, v) ->
               match typ with
@@ -903,7 +906,6 @@ let to_osv ~no_call_opam { header ; summary ; details } =
           in
           let events = add_introduce events in
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo = Some repo ; events })
-        events
     in
     let versions =
       if no_call_opam then
@@ -915,7 +917,21 @@ let to_osv ~no_call_opam { header ; summary ; details } =
       Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
     in
     let ecosystem_specific = Some Json.{ opam_constraint ; affected_bindings } in
-    [ Json.{ package ; severity = None ; ranges = opam_ranges @ ranges ; versions = Some versions ; ecosystem_specific } ]
+    let opam_affected =
+      Json.{ package = Some package ; severity = None ; ranges = opam_ranges @ to_ranges ranges ;
+             versions = Some versions ; ecosystem_specific }
+    in
+    (* GIT ranges go into a separate entry without a package, otherwise osv.dev
+       mixes the git tags into the opam versions (see "Separating Git and Strict
+       Ecosystems" in the OSV schema documentation) *)
+    match git_ranges with
+    | [] -> [ opam_affected ]
+    | _ ->
+      let git_affected =
+        Json.{ package = None ; severity = None ; ranges = to_ranges git_ranges ;
+               versions = None ; ecosystem_specific = None }
+      in
+      [ opam_affected ; git_affected ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
