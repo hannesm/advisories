@@ -156,7 +156,7 @@ type header = {
   severity : (severity_type * string) option;
   severity_score : string option ;
   affected_bindings : string list ;
-  affected : string * pkg_versions ;
+  affected : (string * pkg_versions) option ;
   events : event list ;
   references : reference list ;
   credits : credit list ;
@@ -177,7 +177,8 @@ let pp_header ppf { id ; modified ; published ; withdrawn ; aliases ; upstream ;
     (Option.map (fun (t, s) -> severity_type_to_string t, s) severity);
   Fmt.pf ppf "  severity_score: %a@." Fmt.(option ~none:(any "no") string) severity_score;
   Fmt.pf ppf "  affected_bindings: %a@." Fmt.(list ~sep:(any ", ") string) affected_bindings;
-  Fmt.pf ppf "  affected: %S %a@." (fst affected) pp_pkg_versions (snd affected);
+  Fmt.pf ppf "  affected: %a %a@." Fmt.(option ~none:(any "NO") string) (Option.map fst affected)
+    Fmt.(option ~none:(any "no") pp_pkg_versions) (Option.map snd affected);
   Fmt.pf ppf "  events: %a@." Fmt.(list ~sep:(any ", ") pp_event) events;
   Fmt.pf ppf "  references: %a@."
     Fmt.(list ~sep:(any ", ") (pair ~sep:(any ": ") string string))
@@ -564,8 +565,10 @@ let parse_header ~filename line_offset data =
   in
   let* affected =
     match SM.find_opt "affected" fields with
-    | None -> err_msg "expected something being affected"
-    | Some (_, elem) -> parse_affected pp_error get_lines elem
+    | None -> Ok None
+    | Some (_, elem) ->
+      let* value = parse_affected pp_error get_lines elem in
+      Ok (Some value)
   in
   let* events =
     match SM.find_opt "events" fields with
@@ -860,40 +863,10 @@ let to_osv ~no_call_opam { header ; summary ; details } =
       severity
   in
   let affected =
-    let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
-    let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
     let add_introduce events =
       match List.find_opt (function Json.{ introduced = Some _; _ } -> true | _ -> false) events with
       | None -> range_typ_to_range ~introduced:"0" () :: events
       | Some _ -> List.rev events
-    in
-    let opam_ranges =
-      let atom_to_event = function
-        | `Lt, ver -> range_typ_to_range ~fixed:ver ()
-        | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
-        | `Geq, ver -> range_typ_to_range ~introduced:ver ()
-        | pkg -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
-      in
-      let rec aff_to_events (ranges, events) = function
-        | Atom pkg -> (ranges, atom_to_event pkg :: events)
-        | And (a, b) ->
-          aff_to_events (aff_to_events (ranges, events) a) b
-        | Or (a, b) ->
-          assert (events = []);
-          let (ranges, events_a) = aff_to_events (ranges, []) a in
-          let (ranges, events_b) = aff_to_events (ranges, []) b in
-          (Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_a } ::
-           Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_b } ::
-           ranges,
-           [])
-      in
-      let ranges, events = aff_to_events ([], []) (snd affected) in
-      match events with
-      | [] -> ranges
-      | _ -> Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events } :: ranges
-    in
-    let git_ranges, ranges =
-      List.partition (fun (range_typ, _, _) -> range_typ = Git) events
     in
     let to_ranges =
       List.map (fun (range_typ, repo, events) ->
@@ -907,31 +880,66 @@ let to_osv ~no_call_opam { header ; summary ; details } =
           let events = add_introduce events in
           Json.{ typ = String.uppercase_ascii (event_range_type_to_string range_typ); repo = Some repo ; events })
     in
-    let versions =
-      if no_call_opam then
-        []
-      else
-        Result.get_ok (compute_versions (fst affected) (snd affected))
+    let git_ranges, ranges =
+      List.partition (fun (range_typ, _, _) -> range_typ = Git) events
     in
-    let opam_constraint =
-      Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
-    in
-    let ecosystem_specific = Some Json.{ opam_constraint ; affected_bindings } in
     let opam_affected =
-      Json.{ package = Some package ; severity = None ; ranges = opam_ranges @ to_ranges ranges ;
-             versions = Some versions ; ecosystem_specific }
+      match affected with
+      | Some affected ->
+        let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
+        let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
+        let opam_ranges =
+          let atom_to_event = function
+            | `Lt, ver -> range_typ_to_range ~fixed:ver ()
+            | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
+            | `Geq, ver -> range_typ_to_range ~introduced:ver ()
+            | pkg -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
+          in
+          let rec aff_to_events (ranges, events) = function
+            | Atom pkg -> (ranges, atom_to_event pkg :: events)
+            | And (a, b) ->
+              aff_to_events (aff_to_events (ranges, events) a) b
+            | Or (a, b) ->
+              assert (events = []);
+              let (ranges, events_a) = aff_to_events (ranges, []) a in
+              let (ranges, events_b) = aff_to_events (ranges, []) b in
+              (Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_a } ::
+               Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events_b } ::
+               ranges,
+               [])
+          in
+          let ranges, events = aff_to_events ([], []) (snd affected) in
+          match events with
+          | [] -> ranges
+          | _ -> Json.{ typ = "ECOSYSTEM" ; repo = None ; events = add_introduce events } :: ranges
+        in
+        let versions =
+          if no_call_opam then
+            []
+          else
+            Result.get_ok (compute_versions (fst affected) (snd affected))
+        in
+        let opam_constraint =
+          Some (Fmt.str "%s {%a}" (fst affected) pp_pkg_versions (snd affected))
+        in
+        let ecosystem_specific = Some Json.{ opam_constraint ; affected_bindings } in
+        [
+          Json.{ package = Some package ; severity = None ; ranges = opam_ranges @ to_ranges ranges ;
+                 versions = Some versions ; ecosystem_specific }
+        ]
+      | None -> []
     in
     (* GIT ranges go into a separate entry without a package, otherwise osv.dev
        mixes the git tags into the opam versions (see "Separating Git and Strict
        Ecosystems" in the OSV schema documentation) *)
     match git_ranges with
-    | [] -> [ opam_affected ]
+    | [] -> opam_affected
     | _ ->
       let git_affected =
         Json.{ package = None ; severity = None ; ranges = to_ranges git_ranges ;
                versions = None ; ecosystem_specific = None }
       in
-      [ opam_affected ; git_affected ]
+      opam_affected @ [ git_affected ]
   in
   let references =
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
