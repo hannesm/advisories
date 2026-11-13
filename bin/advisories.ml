@@ -659,6 +659,30 @@ let compute_versions name pkg_versions =
   in
   find_versions pkg_versions
 
+(* opam constraints may use versions that do not exist (e.g. {>= "5"}), but
+   OSV ECOSYSTEM ranges need existing ones (e.g. "5.0.0"). opam lists the
+   versions in ascending order. *)
+let exact_version name ((relop, version) as p) =
+  let versions (relop, version) =
+    let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
+    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
+    match Bos.OS.Cmd.(out_lines (run_out ~err:err_null cmd)) with
+    | Ok (vs, (_, `Exited 0)) -> vs
+    | Ok (_, (_, `Exited 5)) -> [] (* no matching version *)
+    | Ok (_, (_, status)) -> failwith (Fmt.str "%a: %a" Bos.Cmd.pp cmd Bos.OS.Cmd.pp_status status)
+    | Error `Msg msg -> failwith msg
+  in
+  let first = function [] -> None | v :: _ -> Some v in
+  let last vs = first (List.rev vs) in
+  match relop with
+  | `Geq -> Option.map (fun v -> `Geq, v) (first (versions p))
+  | `Lt ->
+    (match first (versions (`Geq, version)) with
+     | Some v -> Some (`Lt, v)
+     | None -> Option.map (fun v -> `Leq, v) (last (versions p)))
+  | `Leq -> Option.map (fun v -> `Leq, v) (last (versions p))
+  | _ -> None
+
 module Json = struct
 
   type severity = {
@@ -889,7 +913,12 @@ let to_osv ~no_call_opam { header ; summary ; details } =
         let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
         let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
         let opam_ranges =
-          let atom_to_event = function
+          let atom_to_event pkg =
+            let pkg =
+              if no_call_opam then pkg
+              else Option.value ~default:pkg (exact_version (fst affected) pkg)
+            in
+            match pkg with
             | `Lt, ver -> range_typ_to_range ~fixed:ver ()
             | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
             | `Geq, ver -> range_typ_to_range ~introduced:ver ()
