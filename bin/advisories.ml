@@ -635,17 +635,20 @@ let parse_file file =
 
 module S = Set.Make(String)
 
-let compute_versions name pkg_versions =
-  let compute_versions (relop, version) =
-    let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
-    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
-    match Bos.OS.Cmd.(to_lines (run_out cmd)) with
+let opam_versions ?(allow_empty = false) name (relop, version) =
+  let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
+  let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
+  match Bos.OS.Cmd.(out_lines (run_out cmd)) with
+  | Ok (_, (_, `Exited 5)) when allow_empty -> Ok [] (* no matching version *)
+  | r ->
+    match Bos.OS.Cmd.success r with
     | Error `Msg msg as e ->
       Logs.err (fun m -> m "command %a resulted in %s" Bos.Cmd.pp cmd msg); e
     | Ok _ as o -> o
-  in
+
+let compute_versions name pkg_versions =
   let rec find_versions = function
-    | Atom a -> compute_versions a
+    | Atom a -> opam_versions name a
     | And (a, b) ->
       let* av = find_versions a in
       let* bv = find_versions b in
@@ -663,15 +666,7 @@ let compute_versions name pkg_versions =
    OSV ECOSYSTEM ranges need existing ones (e.g. "5.0.0"). opam lists the
    versions in ascending order. *)
 let exact_version name ((relop, version) as p) =
-  let versions (relop, version) =
-    let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
-    let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
-    match Bos.OS.Cmd.(out_lines (run_out ~err:err_null cmd)) with
-    | Ok (vs, (_, `Exited 0)) -> vs
-    | Ok (_, (_, `Exited 5)) -> [] (* no matching version *)
-    | Ok (_, (_, status)) -> failwith (Fmt.str "%a: %a" Bos.Cmd.pp cmd Bos.OS.Cmd.pp_status status)
-    | Error `Msg msg -> failwith msg
-  in
+  let versions p = Result.get_ok (opam_versions ~allow_empty:true name p) in
   let first = function [] -> None | v :: _ -> Some v in
   let last vs = first (List.rev vs) in
   match relop with
