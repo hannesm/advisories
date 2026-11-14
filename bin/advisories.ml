@@ -635,16 +635,13 @@ let parse_file file =
 
 module S = Set.Make(String)
 
-let opam_versions ?(allow_empty = false) name (relop, version) =
+let opam_versions name (relop, version) =
   let[@ocaml.warning "-3"] relop_str = OpamPrinter.relop relop in
   let cmd = Bos.Cmd.(v "opam" % "info" % (name ^ relop_str ^ version) % "--color=never" % "--all-versions" % "-f" % "version") in
-  match Bos.OS.Cmd.(out_lines (run_out cmd)) with
-  | Ok (_, (_, `Exited 5)) when allow_empty -> Ok [] (* no matching version *)
-  | r ->
-    match Bos.OS.Cmd.success r with
-    | Error `Msg msg as e ->
-      Logs.err (fun m -> m "command %a resulted in %s" Bos.Cmd.pp cmd msg); e
-    | Ok _ as o -> o
+  match Bos.OS.Cmd.(to_lines (run_out cmd)) with
+  | Error `Msg msg as e ->
+    Logs.err (fun m -> m "command %a resulted in %s" Bos.Cmd.pp cmd msg); e
+  | Ok _ as o -> o
 
 let compute_versions name pkg_versions =
   let rec find_versions = function
@@ -664,19 +661,13 @@ let compute_versions name pkg_versions =
 
 (* opam constraints may use versions that do not exist (e.g. {>= "5"}), but
    OSV ECOSYSTEM ranges need existing ones (e.g. "5.0.0"). opam lists the
-   versions in ascending order. *)
-let exact_version name ((relop, version) as p) =
-  let versions p = Result.get_ok (opam_versions ~allow_empty:true name p) in
-  let first = function [] -> None | v :: _ -> Some v in
-  let last vs = first (List.rev vs) in
+   versions in ascending order. None if there is no such version. *)
+let exact_version name (relop, version) =
+  let versions p = Result.value ~default:[] (opam_versions name p) in
   match relop with
-  | `Geq -> Option.map (fun v -> `Geq, v) (first (versions p))
-  | `Lt ->
-    (match first (versions (`Geq, version)) with
-     | Some v -> Some (`Lt, v)
-     | None -> Option.map (fun v -> `Leq, v) (last (versions p)))
-  | `Leq -> Option.map (fun v -> `Leq, v) (last (versions p))
-  | _ -> None
+  | `Geq | `Lt -> List.nth_opt (versions (`Geq, version)) 0
+  | `Leq -> List.nth_opt (List.rev (versions (`Leq, version))) 0
+  | _ -> Some version
 
 module Json = struct
 
@@ -908,19 +899,18 @@ let to_osv ~no_call_opam { header ; summary ; details } =
         let purl = Result.get_ok (Purl.make "opam" (fst affected) ()) |> Purl.to_string in
         let package = Json.{ ecosystem = "opam" ; name = fst affected ; purl = Some purl } in
         let opam_ranges =
-          let atom_to_event pkg =
-            let pkg =
-              if no_call_opam then pkg
-              else Option.value ~default:pkg (exact_version (fst affected) pkg)
-            in
-            match pkg with
-            | `Lt, ver -> range_typ_to_range ~fixed:ver ()
-            | `Leq, ver -> range_typ_to_range ~last_affected:ver ()
-            | `Geq, ver -> range_typ_to_range ~introduced:ver ()
-            | pkg -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg)
+          let atom_to_event ((relop, ver) as pkg) =
+            let ver = if no_call_opam then Some ver else exact_version (fst affected) pkg in
+            Option.map (fun ver ->
+                match relop with
+                | `Lt -> range_typ_to_range ~fixed:ver ()
+                | `Leq -> range_typ_to_range ~last_affected:ver ()
+                | `Geq -> range_typ_to_range ~introduced:ver ()
+                | _ -> failwith ("couldn't convert " ^ Fmt.to_to_string pp_pkg_version pkg))
+              ver
           in
           let rec aff_to_events (ranges, events) = function
-            | Atom pkg -> (ranges, atom_to_event pkg :: events)
+            | Atom pkg -> (ranges, Option.to_list (atom_to_event pkg) @ events)
             | And (a, b) ->
               aff_to_events (aff_to_events (ranges, events) a) b
             | Or (a, b) ->
