@@ -965,11 +965,21 @@ let to_osv ~no_call_opam { header ; summary ; details } =
   let references =
     (* the advisory itself comes first, as consumers may use the first
        reference as the link to the advisory *)
+    let listed url = List.exists (fun (_, u) -> String.equal u url) references in
     let advisory =
-      if List.exists (fun (_, url) -> String.equal url human_link) references then []
-      else [ Json.{ typ = "ADVISORY" ; url = human_link } ]
+      if listed human_link then [] else [ Json.{ typ = "ADVISORY" ; url = human_link } ]
     in
-    advisory @
+    (* followed by the CVE entries, unless already listed *)
+    let cves =
+      List.fold_left (fun acc id ->
+          let url = "https://nvd.nist.gov/vuln/detail/" ^ id in
+          if not (String.starts_with ~prefix:"CVE-" id) || listed url
+             || List.exists (fun Json.{ url = u ; _ } -> String.equal u url) acc
+          then acc
+          else acc @ [ Json.{ typ = "ADVISORY" ; url } ])
+        [] (aliases @ upstream)
+    in
+    advisory @ cves @
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
       references
   in
