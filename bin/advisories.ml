@@ -977,7 +977,7 @@ let to_osv ~no_call_opam { header ; summary ; details } =
     let cwe = match cwe with [] -> None | xs -> Some xs in
     Some Json.{ osv ; human_link ; cwe }
   in
-  Json.{ schema_version = "1.7.4" ;
+  Json.{ schema_version = "1.7.5" ;
          id ;
          modified = p_to_s modified ;
          published = Option.map p_to_s published ;
