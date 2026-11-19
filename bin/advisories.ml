@@ -955,7 +955,21 @@ let to_osv ~no_call_opam { header ; summary ; details } =
       in
       opam_affected @ [ git_affected ]
   in
+  let base_url = "https://github.com/ocaml/security-advisories/tree/" in
+  let year =
+    let start = String.index id '-' + 1 in
+    let stop = String.rindex id '-' in
+    String.sub id start (stop - start)
+  in
+  let human_link = base_url ^ "main/advisories/" ^ year ^ "/" ^ id ^ ".md" in
   let references =
+    (* the advisory itself comes first, as consumers may use the first
+       reference as the link to the advisory *)
+    let advisory =
+      if List.exists (fun (_, url) -> String.equal url human_link) references then []
+      else [ Json.{ typ = "ADVISORY" ; url = human_link } ]
+    in
+    advisory @
     List.map (fun (typ, url) -> Json.{ typ = String.uppercase_ascii (reference_type_to_string typ) ; url })
       references
   in
@@ -966,14 +980,8 @@ let to_osv ~no_call_opam { header ; summary ; details } =
       credits
   in
   let database_specific =
-    let base_url = "https://github.com/ocaml/security-advisories/tree/" in
-    let year =
-      let start = String.index id '-' + 1 in
-      let stop = String.rindex id '-' in
-      String.sub id start (stop - start)
-    in
     let osv = Some (base_url ^ "generated-osv/" ^ year ^ "/" ^ id ^ ".json") in
-    let human_link = Some (base_url ^ "main/advisories/" ^ year ^ "/" ^ id ^ ".md") in
+    let human_link = Some human_link in
     let cwe = match cwe with [] -> None | xs -> Some xs in
     Some Json.{ osv ; human_link ; cwe }
   in
